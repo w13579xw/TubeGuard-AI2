@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from tqdm import tqdm
 
 from models.topovarad import TopoVarAD, TopoVarADConfig
@@ -70,7 +70,7 @@ def train_one_epoch_stage1(model, loader, optimizer, criterion, scaler, device, 
 
         optimizer.zero_grad()
 
-        with autocast():
+        with autocast(device_type='cuda' if device.type == 'cuda' else 'cpu'):
             outputs = model(images)
             loss_dict = criterion(outputs, stage=1)
             loss = loss_dict['loss_total']
@@ -112,7 +112,7 @@ def train_one_epoch_stage2(model, loader, optimizer, criterion, scaler, device, 
 
         optimizer.zero_grad()
 
-        with autocast():
+        with autocast(device_type='cuda' if device.type == 'cuda' else 'cpu'):
             outputs = model(images)
             loss_dict = criterion(outputs, stage=2)
             loss = loss_dict['loss_total']
@@ -283,7 +283,7 @@ def main():
 
     optimizer = build_optimizer(model, lr, train_config.get('weight_decay', 0.05))
     scheduler = build_scheduler(optimizer, epochs, train_config.get('warmup_epochs', 10))
-    scaler = GradScaler()
+    scaler = GradScaler(device='cuda' if device.type == 'cuda' else 'cpu')
 
     start_epoch = 0
     if args.resume:

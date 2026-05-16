@@ -21,20 +21,37 @@ class T2MTokenizer(nn.Module):
         self.scale_embed = nn.Embedding(len(superpixel_scales), d_model)
         self.pos_proj = nn.Linear(d_model, d_model)
 
-    def _slic_segment(self, image_np, n_segments, compactness=10.0):
+    def _slic_segment(self, image_np, n_segments, compactness=10.0, slic_size=128):
         """
         调用skimage SLIC生成超像素标签图。
+        在低分辨率上做SLIC然后上采样，大幅提升速度。
         image_np: (H, W, 3) float32 [0,1]
         返回: (H, W) int64 超像素标签
         """
-        segments = slic(
-            image_np,
-            n_segments=n_segments,
-            compactness=compactness,
-            start_label=0,
-            channel_axis=-1,
-        )
-        return segments
+        H, W = image_np.shape[:2]
+        if H > slic_size or W > slic_size:
+            from skimage.transform import resize
+            small = resize(image_np, (slic_size, slic_size), anti_aliasing=True, preserve_range=True)
+            small_seg = slic(
+                small,
+                n_segments=n_segments,
+                compactness=compactness,
+                start_label=0,
+                channel_axis=-1,
+            )
+            from skimage.transform import resize as sk_resize
+            seg_resized = sk_resize(
+                small_seg.astype(np.float32), (H, W), order=0, preserve_range=True, anti_aliasing=False
+            ).astype(np.int64)
+            return seg_resized
+        else:
+            return slic(
+                image_np,
+                n_segments=n_segments,
+                compactness=compactness,
+                start_label=0,
+                channel_axis=-1,
+            )
 
     def _superpixel_pool(self, feature_map, seg_mask):
         """
@@ -181,17 +198,32 @@ class T2MTokenizerFast(nn.Module):
 
         self._pe_cache = {}
 
-    def _slic_batch(self, images_np, n_segments):
-        """批量SLIC分割"""
+    def _slic_batch(self, images_np, n_segments, slic_size=128):
+        """批量SLIC分割（低分辨率加速版）"""
         masks = []
         for img in images_np:
-            seg = slic(
-                img,
-                n_segments=n_segments,
-                compactness=self.compactness,
-                start_label=0,
-                channel_axis=-1,
-            )
+            H, W = img.shape[:2]
+            if H > slic_size or W > slic_size:
+                from skimage.transform import resize
+                small = resize(img, (slic_size, slic_size), anti_aliasing=True, preserve_range=True)
+                small_seg = slic(
+                    small,
+                    n_segments=n_segments,
+                    compactness=self.compactness,
+                    start_label=0,
+                    channel_axis=-1,
+                )
+                seg = resize(
+                    small_seg.astype(np.float32), (H, W), order=0, preserve_range=True, anti_aliasing=False
+                ).astype(np.int64)
+            else:
+                seg = slic(
+                    img,
+                    n_segments=n_segments,
+                    compactness=self.compactness,
+                    start_label=0,
+                    channel_axis=-1,
+                )
             masks.append(seg)
         return masks
 
