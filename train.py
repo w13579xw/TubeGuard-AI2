@@ -13,7 +13,7 @@ from torch.cuda.amp import GradScaler, autocast
 from tqdm import tqdm
 
 from models.topovarad import TopoVarAD, TopoVarADConfig
-from data.dataset import MVTecDataset
+from data.dataset import CSVDataset, MVTecDataset
 from utils.losses import TopoVarADLoss
 from utils.metrics import MetricsCalculator
 
@@ -164,6 +164,44 @@ def evaluate(model, loader, device):
     return metrics.compute()
 
 
+def build_datasets(config):
+    """根据配置构建训练和测试数据集。"""
+    data_config = config.get('data', {})
+    train_config = config.get('train', {})
+    dataset_type = data_config.get('dataset_type', 'csv')
+
+    if dataset_type == 'mvtec':
+        train_dataset = MVTecDataset(
+            root=data_config.get('dataset_path', 'data/mvtec'),
+            category=data_config.get('category', 'bottle'),
+            split='train',
+            image_size=data_config.get('image_size', 512),
+        )
+        test_dataset = MVTecDataset(
+            root=data_config.get('dataset_path', 'data/mvtec'),
+            category=data_config.get('category', 'bottle'),
+            split='test',
+            image_size=data_config.get('image_size', 512),
+        )
+    else:
+        train_dataset = CSVDataset(
+            csv_path=data_config.get('train_csv', 'data/train.csv'),
+            images_dir=data_config.get('images_dir', 'data/images'),
+            split='train',
+            image_size=data_config.get('image_size', 512),
+            augment=train_config.get('augment', True),
+        )
+        test_dataset = CSVDataset(
+            csv_path=data_config.get('test_csv', 'data/test.csv'),
+            images_dir=data_config.get('images_dir', 'data/images'),
+            split='test',
+            image_size=data_config.get('image_size', 512),
+            augment=False,
+        )
+
+    return train_dataset, test_dataset
+
+
 def main():
     parser = argparse.ArgumentParser(description='TopoVarAD Training')
     parser.add_argument('--config', type=str, default='configs/default.yaml')
@@ -181,23 +219,22 @@ def main():
     data_config = config.get('data', {})
     model_config = config.get('model', {})
 
-    train_dataset = MVTecDataset(
-        root=data_config.get('dataset_path', 'data/mvtec'),
-        category=args.category,
-        split='train',
-        image_size=data_config.get('image_size', 512),
-    )
-    test_dataset = MVTecDataset(
-        root=data_config.get('dataset_path', 'data/mvtec'),
-        category=args.category,
-        split='test',
-        image_size=data_config.get('image_size', 512),
-    )
+    train_dataset, test_dataset = build_datasets(config)
+
+    use_sampler = train_config.get('use_sampler', True)
+    sampler = None
+    shuffle = True
+    if use_sampler and hasattr(train_dataset, 'get_sampler'):
+        sampler = train_dataset.get_sampler()
+        shuffle = False
+        n_normal, n_defect = train_dataset.get_class_counts()
+        print(f"Using WeightedRandomSampler (Normal: {n_normal}, Defect: {n_defect})")
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=train_config.get('batch_size', 4),
-        shuffle=True,
+        shuffle=shuffle,
+        sampler=sampler,
         num_workers=data_config.get('num_workers', 4),
         pin_memory=True,
         drop_last=True,
@@ -297,7 +334,7 @@ def main():
                     model, optimizer, scheduler, epoch, train_metrics['loss'],
                     os.path.join(ckpt_dir, f'stage{stage}_best.pth')
                 )
-                print(f"  → Best model saved (I-AUROC={best_auroc:.4f})")
+                print(f"  -> Best model saved (I-AUROC={best_auroc:.4f})")
 
         if (epoch + 1) % 50 == 0:
             save_checkpoint(

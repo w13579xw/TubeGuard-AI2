@@ -5,7 +5,7 @@ import numpy as np
 from PIL import Image
 
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, WeightedRandomSampler
 from torchvision import transforms
 
 
@@ -191,6 +191,11 @@ class CSVDataset(Dataset):
         image列为文件名（如 2506.jpg）
         label列为 [有缺陷] 或 [无缺陷]
     图像存放在 images_dir 目录下。
+
+    特点：
+    - 自动处理灰度图（转为3通道）
+    - 支持训练时数据增强
+    - 支持类别权重计算
     """
 
     LABEL_MAP = {
@@ -200,19 +205,30 @@ class CSVDataset(Dataset):
         '有缺陷': 1,
     }
 
-    def __init__(self, csv_path, images_dir, split='train', transform=None, image_size=512):
+    def __init__(self, csv_path, images_dir, split='train', transform=None, image_size=512, augment=False):
         self.csv_path = csv_path
         self.images_dir = images_dir
         self.split = split
         self.image_size = image_size
+        self.augment = augment and (split == 'train')
 
-        if transform is None:
+        if transform is not None:
+            self.transform = transform
+        elif self.augment:
+            self.transform = transforms.Compose([
+                transforms.Resize((image_size, image_size)),
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.RandomVerticalFlip(p=0.5),
+                transforms.RandomRotation(15),
+                transforms.RandomAffine(degrees=0, translate=(0.05, 0.05), scale=(0.95, 1.05)),
+                transforms.ColorJitter(brightness=0.2, contrast=0.2),
+                transforms.ToTensor(),
+            ])
+        else:
             self.transform = transforms.Compose([
                 transforms.Resize((image_size, image_size)),
                 transforms.ToTensor(),
             ])
-        else:
-            self.transform = transform
 
         self.samples = []
         self._load_csv()
@@ -230,7 +246,6 @@ class CSVDataset(Dataset):
                     self.samples.append({
                         'image_path': image_path,
                         'label': label,
-                        'label_str': label_str,
                     })
 
     def __len__(self):
@@ -239,7 +254,9 @@ class CSVDataset(Dataset):
     def __getitem__(self, idx):
         sample = self.samples[idx]
 
-        image = Image.open(sample['image_path']).convert('RGB')
+        image = Image.open(sample['image_path'])
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
         image = self.transform(image)
 
         label = torch.tensor(sample['label'], dtype=torch.long)
@@ -249,54 +266,80 @@ class CSVDataset(Dataset):
             'image': image,
             'label': label,
             'mask': mask,
-            'defect_type': sample['label_str'],
+            'defect_type': 'defect' if label == 1 else 'good',
             'image_path': sample['image_path'],
         }
 
+    def get_class_counts(self):
+        """统计各类别样本数"""
+        n_normal = sum(1 for s in self.samples if s['label'] == 0)
+        n_defect = sum(1 for s in self.samples if s['label'] == 1)
+        return n_normal, n_defect
 
-def build_dataloader(config, split='train'):
-    """根据配置构建DataLoader。支持MVTec和CSV两种数据格式。"""
+    def get_sampler(self):
+        """
+        返回WeightedRandomSampler，用于处理类别不平衡。
+        对少数类过采样，使每个epoch中两类样本数量相等。
+        """
+        labels = [s['label'] for s in self.samples]
+        class_counts = np.bincount(labels)
+        class_weights = 1.0 / class_counts
+        sample_weights = [class_weights[l] for l in labels]
+        return WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(sample_weights),
+            replacement=True,
+        )
+
+
+def build_dataloader(config, split='train', use_sampler=True):
+    """根据配置构建DataLoader。"""
     from torch.utils.data import DataLoader
 
-    csv_path = config.get('csv_path')
-    if csv_path:
-        images_dir = config.get('images_dir', 'data/images')
-        dataset = CSVDataset(
-            csv_path=csv_path,
-            images_dir=images_dir,
-            split=split,
-            image_size=config.get('image_size', 512),
-        )
-    else:
-        dataset = MVTecDataset(
-            root=config.get('dataset_path', 'data/mvtec'),
-            category=config.get('category', 'bottle'),
-            split=split,
-            image_size=config.get('image_size', 512),
-        )
+    data_config = config.get('data', {})
+    train_config = config.get('train', {})
+
+    dataset = CSVDataset(
+        csv_path=data_config.get(f'{split}_csv', f'data/{split}.csv'),
+        images_dir=data_config.get('images_dir', 'data/images'),
+        split=split,
+        image_size=data_config.get('image_size', 512),
+        augment=train_config.get('augment', True),
+    )
+
+    batch_size = train_config.get('batch_size', 4) if split == 'train' else 1
+
+    sampler = None
+    shuffle = (split == 'train')
+    if split == 'train' and use_sampler:
+        sampler = dataset.get_sampler()
+        shuffle = False
 
     loader = DataLoader(
         dataset,
-        batch_size=config.get('batch_size', 4) if split == 'train' else 1,
-        shuffle=(split == 'train'),
-        num_workers=config.get('num_workers', 4),
+        batch_size=batch_size,
+        shuffle=shuffle,
+        sampler=sampler,
+        num_workers=data_config.get('num_workers', 4),
         pin_memory=True,
         drop_last=(split == 'train'),
     )
 
-    return loader
+    return loader, dataset
 
 
 if __name__ == "__main__":
-    dataset = MVTecDataset(
-        root='data/mvtec',
-        category='bottle',
+    dataset = CSVDataset(
+        csv_path='data/train.csv',
+        images_dir='data/images',
         split='train',
         image_size=512,
+        augment=True,
     )
     print(f"Dataset size: {len(dataset)}")
-    if len(dataset) > 0:
-        sample = dataset[0]
-        print(f"Image shape: {sample['image'].shape}")
-        print(f"Label: {sample['label']}")
-        print(f"Mask shape: {sample['mask'].shape}")
+    n_normal, n_defect = dataset.get_class_counts()
+    print(f"Normal: {n_normal}, Defect: {n_defect}")
+
+    sample = dataset[0]
+    print(f"Image shape: {sample['image'].shape}")
+    print(f"Label: {sample['label']}")

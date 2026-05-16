@@ -21,8 +21,13 @@ train:
   lambda_rqvae: 0.5
   lambda_ar: 1.0
   checkpoint_dir: checkpoints/
+  augment: true
+  use_sampler: true
 
 data:
+  dataset_type: csv
+  train_csv: ../data/train.csv
+  test_csv: ../data/test.csv
+  images_dir: ../data/images
   image_size: 512
   num_workers: 8
-  dataset_path: data/mvtec
