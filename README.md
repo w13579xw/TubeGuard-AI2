@@ -46,6 +46,30 @@ pip install torch torchvision einops scikit-image scikit-learn opencv-python mat
 
 支持三种数据集格式：
 
+**CSV格式**（默认，自定义工业数据）：
+```
+data/
+├── train.csv          # image,label
+├── test.csv
+└── images/            # 所有图片（支持灰度/RGB，自动转3通道）
+    ├── 1.jpg
+    ├── 2.jpg
+    └── ...
+```
+
+CSV格式示例：
+```csv
+image,label
+1.jpg,[有缺陷]
+2.jpg,[无缺陷]
+```
+
+数据特点（以当前数据集为例）：
+- 4024×3036 灰度工业图像
+- 训练集：1600有缺陷 + 800无缺陷（2:1不平衡）
+- 测试集：444有缺陷 + 156无缺陷
+- 自动通过WeightedRandomSampler处理类别不平衡
+
 **MVTec AD**（标准基准）：
 ```
 data/mvtec/
@@ -54,13 +78,6 @@ data/mvtec/
     ├── test/good/
     ├── test/broken/
     └── ground_truth/broken/
-```
-
-**CSV格式**（自定义工业数据）：
-```csv
-image,label
-1.jpg,[无缺陷]
-2.jpg,[有缺陷]
 ```
 
 **自定义目录**：
