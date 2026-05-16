@@ -66,11 +66,11 @@ class T2MTokenizer(nn.Module):
         seg_tensor = torch.from_numpy(seg_mask).long().to(device)
         num_sp = int(seg_tensor.max().item()) + 1
 
-        flat = feature_map.reshape(B, C, H * W)
+        flat = feature_map.reshape(B, C, H * W).float()
         seg_flat = seg_tensor.reshape(H * W)
 
-        sum_features = torch.zeros(B, C, num_sp, device=device)
-        count = torch.zeros(num_sp, device=device)
+        sum_features = torch.zeros(B, C, num_sp, device=device, dtype=flat.dtype)
+        count = torch.zeros(num_sp, device=device, dtype=flat.dtype)
 
         for b in range(B):
             sum_features[b].scatter_add_(
@@ -240,7 +240,7 @@ class T2MTokenizerFast(nn.Module):
         seg = torch.from_numpy(seg_mask).long().to(device).reshape(-1)
         num_sp = int(seg.max().item()) + 1
 
-        flat = feature_map.reshape(B, C, -1)
+        flat = feature_map.reshape(B, C, -1).float()
         one_hot = F.one_hot(seg, num_sp).float().to(device)
 
         sum_feat = torch.bmm(flat, one_hot.unsqueeze(0).expand(B, -1, -1))
