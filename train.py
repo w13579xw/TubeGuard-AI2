@@ -269,7 +269,7 @@ def main():
         lambda_lpips=train_config.get('lambda_lpips', 0.1),
         lambda_rqvae=train_config.get('lambda_rqvae', 0.5),
         lambda_ar=train_config.get('lambda_ar', 1.0),
-    )
+    ).to(device)
 
     stage = args.stage
     model.set_stage(stage)
