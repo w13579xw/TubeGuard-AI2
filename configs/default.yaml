@@ -13,7 +13,7 @@ model:
 train:
   stage1_epochs: 100
   stage2_epochs: 150
-  batch_size: 4
+  batch_size: 16
   lr_stage1: 1.0e-4
   lr_stage2: 5.0e-5
   weight_decay: 0.05
