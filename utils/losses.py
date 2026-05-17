@@ -110,11 +110,12 @@ class TopoVarADLoss(nn.Module):
     Stage2: L = L_pixel + λ_lpips * L_lpips + λ_rqvae * L_rqvae + λ_ar * L_ar
     """
 
-    def __init__(self, lambda_lpips=0.1, lambda_rqvae=0.5, lambda_ar=1.0):
+    def __init__(self, lambda_lpips=0.1, lambda_rqvae=0.5, lambda_ar=1.0, label_smoothing=0.0):
         super().__init__()
         self.lambda_lpips = lambda_lpips
         self.lambda_rqvae = lambda_rqvae
         self.lambda_ar = lambda_ar
+        self.label_smoothing = label_smoothing
 
         self.ssim_loss = SSIMLoss()
         self.lpips_loss = LPIPSLoss()

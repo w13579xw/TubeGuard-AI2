@@ -269,6 +269,7 @@ def main():
         lambda_lpips=train_config.get('lambda_lpips', 0.1),
         lambda_rqvae=train_config.get('lambda_rqvae', 0.5),
         lambda_ar=train_config.get('lambda_ar', 1.0),
+        label_smoothing=train_config.get('label_smoothing', 0.1),
     ).to(device)
 
     stage = args.stage
@@ -293,12 +294,15 @@ def main():
 
     ckpt_dir = train_config.get('checkpoint_dir', 'checkpoints')
     best_auroc = 0.0
+    patience = train_config.get('early_stopping', 20)
+    patience_counter = 0
 
     print(f"\n{'='*60}")
     print(f"Starting Stage {stage} Training")
     print(f"  Epochs: {epochs}")
     print(f"  Learning Rate: {lr}")
     print(f"  Batch Size: {train_config.get('batch_size', 4)}")
+    print(f"  Early Stopping: {patience} epochs")
     print(f"{'='*60}\n")
 
     for epoch in range(start_epoch, epochs):
@@ -330,11 +334,17 @@ def main():
 
             if eval_metrics.get('I-AUROC', 0) > best_auroc:
                 best_auroc = eval_metrics['I-AUROC']
+                patience_counter = 0
                 save_checkpoint(
                     model, optimizer, scheduler, epoch, train_metrics['loss'],
                     os.path.join(ckpt_dir, f'stage{stage}_best.pth')
                 )
                 print(f"  -> Best model saved (I-AUROC={best_auroc:.4f})")
+            else:
+                patience_counter += 10
+                if patience_counter >= patience:
+                    print(f"\nEarly stopping at epoch {epoch+1} (no improvement for {patience} epochs)")
+                    break
 
         if (epoch + 1) % 50 == 0:
             save_checkpoint(
