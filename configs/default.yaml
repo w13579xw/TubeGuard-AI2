@@ -22,6 +22,7 @@ train:
   lambda_rqvae: 0.5
   lambda_ar: 1.0
   checkpoint_dir: checkpoints/
+  log_dir: logs/
   augment: true
   use_sampler: true
   early_stopping: 20

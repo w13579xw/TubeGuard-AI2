@@ -16,6 +16,7 @@ from models.topovarad import TopoVarAD, TopoVarADConfig
 from data.dataset import CSVDataset, MVTecDataset
 from utils.losses import TopoVarADLoss
 from utils.metrics import MetricsCalculator
+from utils.logger import TrainingLogger
 
 
 def load_config(path):
@@ -297,6 +298,13 @@ def main():
     patience = train_config.get('early_stopping', 20)
     patience_counter = 0
 
+    log_dir = train_config.get('log_dir', 'logs')
+    logger = TrainingLogger(log_dir=log_dir, stage=stage)
+    logger.log_message(f"Starting Stage {stage} Training")
+    logger.log_message(f"  Epochs: {epochs}, LR: {lr}, Batch Size: {train_config.get('batch_size', 4)}")
+    logger.log_message(f"  Early Stopping: {patience} epochs, Device: {device}")
+    logger.log_message(f"  Model parameters: {total_params:,}")
+
     print(f"\n{'='*60}")
     print(f"Starting Stage {stage} Training")
     print(f"  Epochs: {epochs}")
@@ -322,9 +330,7 @@ def main():
         elapsed = time.time() - t0
         lr_current = optimizer.param_groups[0]['lr']
 
-        print(f"Epoch {epoch+1}/{epochs} [{elapsed:.1f}s] "
-              f"lr={lr_current:.2e} loss={train_metrics['loss']:.4f}")
-
+        eval_metrics = None
         if (epoch + 1) % 10 == 0 or epoch == epochs - 1:
             eval_metrics = evaluate(model, test_loader, device)
             print(f"  Eval: ", end="")
@@ -343,8 +349,10 @@ def main():
             else:
                 patience_counter += 10
                 if patience_counter >= patience:
-                    print(f"\nEarly stopping at epoch {epoch+1} (no improvement for {patience} epochs)")
+                    logger.log_message(f"Early stopping at epoch {epoch+1}")
                     break
+
+        logger.log_epoch(epoch, train_metrics, eval_metrics, lr_current, elapsed)
 
         if (epoch + 1) % 50 == 0:
             save_checkpoint(
@@ -352,7 +360,11 @@ def main():
                 os.path.join(ckpt_dir, f'stage{stage}_epoch{epoch+1}.pth')
             )
 
+    logger.log_message(f"Stage {stage} training finished. Best I-AUROC: {best_auroc:.4f}")
     print(f"\nStage {stage} training finished. Best I-AUROC: {best_auroc:.4f}")
+
+    logger.plot_training_curves()
+    logger.close()
 
     save_checkpoint(
         model, optimizer, scheduler, epochs - 1, train_metrics['loss'],
