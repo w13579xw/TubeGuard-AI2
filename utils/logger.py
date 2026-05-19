@@ -32,8 +32,22 @@ class TrainingLogger:
     def _init_csv(self, headers):
         if self.csv_writer is None:
             self.headers = headers
-            self.csv_writer = csv.DictWriter(self.csv_file, fieldnames=headers)
+            self.csv_writer = csv.DictWriter(self.csv_file, fieldnames=headers, extrasaction='ignore')
             self.csv_writer.writeheader()
+        else:
+            new_cols = [h for h in headers if h not in self.headers]
+            if new_cols:
+                self.headers.extend(new_cols)
+                self.csv_file.close()
+                # Rewrite CSV with updated headers
+                rows = self.history
+                with open(self.csv_path, 'w', newline='', encoding='utf-8') as f:
+                    writer = csv.DictWriter(f, fieldnames=self.headers, extrasaction='ignore')
+                    writer.writeheader()
+                    for r in rows:
+                        writer.writerow(r)
+                self.csv_file = open(self.csv_path, 'a', newline='', encoding='utf-8')
+                self.csv_writer = csv.DictWriter(self.csv_file, fieldnames=self.headers, extrasaction='ignore')
 
     def log_epoch(self, epoch, train_metrics, eval_metrics=None, lr=None, elapsed=None):
         """记录一个epoch的信息。"""
