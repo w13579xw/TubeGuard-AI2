@@ -48,55 +48,13 @@ def save_checkpoint(model, optimizer, scheduler, epoch, loss, path):
     }, path)
 
 
-def load_checkpoint(model, optimizer, scheduler, path):
+def load_stage1_checkpoint(model, path):
+    """加载Stage1的模型权重，只加载模型参数"""
     ckpt = torch.load(path, map_location='cpu')
     model.load_state_dict(ckpt['model_state_dict'])
-    if optimizer:
-        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-    if scheduler:
-        scheduler.load_state_dict(ckpt['scheduler_state_dict'])
-    return ckpt['epoch'], ckpt['loss']
-
-
-def train_one_epoch_stage1(model, loader, optimizer, criterion, scaler, device, epoch):
-    model.train()
-    total_loss = 0.0
-    total_pixel = 0.0
-    total_lpips = 0.0
-    n_batches = 0
-
-    pbar = tqdm(loader, desc=f'[Stage1] Epoch {epoch}', leave=False)
-    for batch in pbar:
-        images = batch['image'].to(device)
-
-        optimizer.zero_grad()
-
-        with autocast(device_type='cuda' if device.type == 'cuda' else 'cpu'):
-            outputs = model(images)
-            loss_dict = criterion(outputs, stage=1)
-            loss = loss_dict['loss_total']
-
-        scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-        nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        scaler.step(optimizer)
-        scaler.update()
-
-        total_loss += loss.item()
-        total_pixel += loss_dict['loss_pixel'].item()
-        total_lpips += loss_dict['loss_lpips'].item()
-        n_batches += 1
-
-        pbar.set_postfix({
-            'loss': f'{loss.item():.4f}',
-            'pixel': f'{loss_dict["loss_pixel"].item():.4f}',
-        })
-
-    return {
-        'loss': total_loss / max(n_batches, 1),
-        'loss_pixel': total_pixel / max(n_batches, 1),
-        'loss_lpips': total_lpips / max(n_batches, 1),
-    }
+    print(f"Loaded Stage1 checkpoint from {path}")
+    print(f"  Stage1 ended at epoch {ckpt['epoch']}, loss={ckpt['loss']:.4f}")
+    return ckpt['epoch']
 
 
 def train_one_epoch_stage2(model, loader, optimizer, criterion, scaler, device, epoch):
@@ -120,7 +78,7 @@ def train_one_epoch_stage2(model, loader, optimizer, criterion, scaler, device, 
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
-        nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)  # Stage2使用更严格的梯度裁剪
+        nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
         scaler.step(optimizer)
         scaler.update()
 
@@ -204,11 +162,10 @@ def build_datasets(config):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='TopoVarAD Training')
+    parser = argparse.ArgumentParser(description='TopoVarAD Stage2 Training from Stage1')
     parser.add_argument('--config', type=str, default='configs/default.yaml')
-    parser.add_argument('--category', type=str, default='bottle')
-    parser.add_argument('--resume', type=str, default=None)
-    parser.add_argument('--stage', type=int, default=1, choices=[1, 2])
+    parser.add_argument('--stage1_checkpoint', type=str, required=True,
+                        help='Path to Stage1 checkpoint (e.g., checkpoints/stage1_best.pth)')
     parser.add_argument('--device', type=str, default='cuda')
     args = parser.parse_args()
 
@@ -266,6 +223,13 @@ def main():
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {total_params:,}")
 
+    # 加载Stage1的权重
+    stage1_epoch = load_stage1_checkpoint(model, args.stage1_checkpoint)
+
+    # 切换到Stage2模式
+    model.set_stage(2)
+    print("Switched to Stage 2 mode")
+
     criterion = TopoVarADLoss(
         lambda_lpips=train_config.get('lambda_lpips', 0.1),
         lambda_rqvae=train_config.get('lambda_rqvae', 0.5),
@@ -273,25 +237,12 @@ def main():
         label_smoothing=train_config.get('label_smoothing', 0.1),
     ).to(device)
 
-    stage = args.stage
-    model.set_stage(stage)
-
-    if stage == 1:
-        epochs = train_config.get('stage1_epochs', 200)
-        lr = train_config.get('lr_stage1', 1e-4)
-    else:
-        epochs = train_config.get('stage2_epochs', 300)
-        lr = train_config.get('lr_stage2', 1e-5)  # 降低学习率从5e-5到1e-5
+    epochs = train_config.get('stage2_epochs', 300)
+    lr = train_config.get('lr_stage2', 1e-5)
 
     optimizer = build_optimizer(model, lr, train_config.get('weight_decay', 0.05))
     scheduler = build_scheduler(optimizer, epochs, train_config.get('warmup_epochs', 10))
     scaler = GradScaler(device='cuda' if device.type == 'cuda' else 'cpu')
-
-    start_epoch = 0
-    if args.resume:
-        start_epoch, _ = load_checkpoint(model, optimizer, scheduler, args.resume)
-        start_epoch += 1
-        print(f"Resumed from epoch {start_epoch}")
 
     ckpt_dir = train_config.get('checkpoint_dir', 'checkpoints')
     best_auroc = 0.0
@@ -299,31 +250,31 @@ def main():
     patience_counter = 0
 
     log_dir = train_config.get('log_dir', 'logs')
-    logger = TrainingLogger(log_dir=log_dir, stage=stage)
-    logger.log_message(f"Starting Stage {stage} Training")
+    logger = TrainingLogger(log_dir=log_dir, stage=2)
+    logger.log_message(f"Starting Stage 2 Training (from Stage1 checkpoint)")
+    logger.log_message(f"  Stage1 checkpoint: {args.stage1_checkpoint}")
+    logger.log_message(f"  Stage1 ended at epoch: {stage1_epoch}")
     logger.log_message(f"  Epochs: {epochs}, LR: {lr}, Batch Size: {train_config.get('batch_size', 4)}")
     logger.log_message(f"  Early Stopping: {patience} epochs, Device: {device}")
     logger.log_message(f"  Model parameters: {total_params:,}")
+    logger.log_message(f"  Gradient clipping: 0.5 (stricter than Stage1)")
 
     print(f"\n{'='*60}")
-    print(f"Starting Stage {stage} Training")
+    print(f"Starting Stage 2 Training")
+    print(f"  Loaded from Stage1: {args.stage1_checkpoint}")
     print(f"  Epochs: {epochs}")
-    print(f"  Learning Rate: {lr}")
+    print(f"  Learning Rate: {lr} (reduced from 5e-5)")
     print(f"  Batch Size: {train_config.get('batch_size', 4)}")
     print(f"  Early Stopping: {patience} epochs")
+    print(f"  Gradient Clipping: 0.5 (stricter)")
     print(f"{'='*60}\n")
 
-    for epoch in range(start_epoch, epochs):
+    for epoch in range(epochs):
         t0 = time.time()
 
-        if stage == 1:
-            train_metrics = train_one_epoch_stage1(
-                model, train_loader, optimizer, criterion, scaler, device, epoch
-            )
-        else:
-            train_metrics = train_one_epoch_stage2(
-                model, train_loader, optimizer, criterion, scaler, device, epoch
-            )
+        train_metrics = train_one_epoch_stage2(
+            model, train_loader, optimizer, criterion, scaler, device, epoch
+        )
 
         scheduler.step()
 
@@ -343,7 +294,7 @@ def main():
                 patience_counter = 0
                 save_checkpoint(
                     model, optimizer, scheduler, epoch, train_metrics['loss'],
-                    os.path.join(ckpt_dir, f'stage{stage}_best.pth')
+                    os.path.join(ckpt_dir, 'stage2_best.pth')
                 )
                 print(f"  -> Best model saved (I-AUROC={best_auroc:.4f})")
             else:
@@ -357,18 +308,18 @@ def main():
         if (epoch + 1) % 50 == 0:
             save_checkpoint(
                 model, optimizer, scheduler, epoch, train_metrics['loss'],
-                os.path.join(ckpt_dir, f'stage{stage}_epoch{epoch+1}.pth')
+                os.path.join(ckpt_dir, f'stage2_epoch{epoch+1}.pth')
             )
 
-    logger.log_message(f"Stage {stage} training finished. Best I-AUROC: {best_auroc:.4f}")
-    print(f"\nStage {stage} training finished. Best I-AUROC: {best_auroc:.4f}")
+    logger.log_message(f"Stage 2 training finished. Best I-AUROC: {best_auroc:.4f}")
+    print(f"\nStage 2 training finished. Best I-AUROC: {best_auroc:.4f}")
 
     logger.plot_training_curves()
     logger.close()
 
     save_checkpoint(
         model, optimizer, scheduler, epochs - 1, train_metrics['loss'],
-        os.path.join(ckpt_dir, f'stage{stage}_final.pth')
+        os.path.join(ckpt_dir, 'stage2_final.pth')
     )
 
 
