@@ -4,6 +4,7 @@ import time
 import argparse
 import yaml
 import numpy as np
+import math
 
 import torch
 import torch.nn as nn
@@ -63,6 +64,7 @@ def train_one_epoch_stage2(model, loader, optimizer, criterion, scaler, device, 
     total_pixel = 0.0
     total_rqvae = 0.0
     total_ar = 0.0
+    total_diversity = 0.0
     n_batches = 0
 
     pbar = tqdm(loader, desc=f'[Stage2] Epoch {epoch}', leave=False)
@@ -86,11 +88,13 @@ def train_one_epoch_stage2(model, loader, optimizer, criterion, scaler, device, 
         total_pixel += loss_dict['loss_pixel'].item()
         total_rqvae += loss_dict['loss_rqvae'].item()
         total_ar += loss_dict['loss_ar'].item()
+        total_diversity += loss_dict.get('loss_diversity', torch.tensor(0.0)).item()
         n_batches += 1
 
         pbar.set_postfix({
             'loss': f'{loss.item():.4f}',
             'ar': f'{loss_dict["loss_ar"].item():.4f}',
+            'div': f'{loss_dict.get("loss_diversity", torch.tensor(0.0)).item():.4f}',
         })
 
     return {
@@ -98,7 +102,57 @@ def train_one_epoch_stage2(model, loader, optimizer, criterion, scaler, device, 
         'loss_pixel': total_pixel / max(n_batches, 1),
         'loss_rqvae': total_rqvae / max(n_batches, 1),
         'loss_ar': total_ar / max(n_batches, 1),
+        'loss_diversity': total_diversity / max(n_batches, 1),
     }
+
+
+@torch.no_grad()
+def monitor_codebook(model, loader, device):
+    """
+    监控码本使用情况和分布熵
+    """
+    model.eval()
+    all_codes = []
+
+    for batch in tqdm(loader, desc='Monitoring codebook', leave=False):
+        images = batch['image'].to(device)
+        outputs = model(images)
+        if 'codes' in outputs:
+            all_codes.append(outputs['codes'].cpu())
+
+    if len(all_codes) == 0:
+        return None
+
+    all_codes = torch.cat(all_codes, dim=0)
+    B, D = all_codes.shape
+    n_codes = 1024
+
+    stats = {
+        'usage': [],
+        'entropy': [],
+        'active_ratio': []
+    }
+
+    for d in range(D):
+        layer_codes = all_codes[:, d]
+        hist = torch.histc(layer_codes.float(), bins=n_codes, min=0, max=n_codes-1)
+
+        # 使用率
+        active_codes = (hist > 0).sum().item()
+        active_ratio = active_codes / n_codes
+        stats['active_ratio'].append(active_ratio)
+
+        # 熵
+        prob = hist / (hist.sum() + 1e-10)
+        entropy = -(prob * torch.log(prob + 1e-10)).sum().item()
+        max_entropy = math.log(n_codes)
+        stats['entropy'].append(entropy / max_entropy)
+
+        # 码本使用率（从模型获取）
+        usage = model.rqvae.rq.get_codebook_usage()
+        stats['usage'] = usage
+
+    return stats
 
 
 @torch.no_grad()
@@ -288,6 +342,13 @@ def main():
             for k, v in eval_metrics.items():
                 print(f"{k}={v:.4f} ", end="")
             print()
+
+            # 监控码本状态（每10个epoch）
+            codebook_stats = monitor_codebook(model, train_loader, device)
+            if codebook_stats:
+                print(f"  Codebook usage: {[f'{u:.2%}' for u in codebook_stats['usage']]}")
+                print(f"  Codebook entropy: {[f'{e:.3f}' for e in codebook_stats['entropy']]}")
+                print(f"  Active ratio: {[f'{r:.2%}' for r in codebook_stats['active_ratio']]}")
 
             if eval_metrics.get('I-AUROC', 0) > best_auroc:
                 best_auroc = eval_metrics['I-AUROC']

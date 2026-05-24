@@ -105,6 +105,7 @@ def train_one_epoch_stage2(model, loader, optimizer, criterion, scaler, device, 
     total_pixel = 0.0
     total_rqvae = 0.0
     total_ar = 0.0
+    total_diversity = 0.0
     n_batches = 0
 
     pbar = tqdm(loader, desc=f'[Stage2] Epoch {epoch}', leave=False)
@@ -128,6 +129,7 @@ def train_one_epoch_stage2(model, loader, optimizer, criterion, scaler, device, 
         total_pixel += loss_dict['loss_pixel'].item()
         total_rqvae += loss_dict['loss_rqvae'].item()
         total_ar += loss_dict['loss_ar'].item()
+        total_diversity += loss_dict.get('loss_diversity', torch.tensor(0.0)).item()
         n_batches += 1
 
         pbar.set_postfix({
@@ -140,6 +142,7 @@ def train_one_epoch_stage2(model, loader, optimizer, criterion, scaler, device, 
         'loss_pixel': total_pixel / max(n_batches, 1),
         'loss_rqvae': total_rqvae / max(n_batches, 1),
         'loss_ar': total_ar / max(n_batches, 1),
+        'loss_diversity': total_diversity / max(n_batches, 1),
     }
 
 

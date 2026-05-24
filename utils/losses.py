@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 
 
 class SSIMLoss(nn.Module):
@@ -107,18 +108,46 @@ class TopoVarADLoss(nn.Module):
     TopoVarAD联合损失函数。
 
     Stage1: L = L_pixel + λ_lpips * L_lpips
-    Stage2: L = L_pixel + λ_lpips * L_lpips + λ_rqvae * L_rqvae + λ_ar * L_ar
+    Stage2: L = L_pixel + λ_lpips * L_lpips + λ_rqvae * L_rqvae + λ_ar * L_ar + λ_diversity * L_diversity
     """
 
-    def __init__(self, lambda_lpips=0.1, lambda_rqvae=0.5, lambda_ar=1.0, label_smoothing=0.0):
+    def __init__(self, lambda_lpips=0.1, lambda_rqvae=0.5, lambda_ar=1.0, lambda_diversity=0.01, label_smoothing=0.0):
         super().__init__()
         self.lambda_lpips = lambda_lpips
         self.lambda_rqvae = lambda_rqvae
         self.lambda_ar = lambda_ar
+        self.lambda_diversity = lambda_diversity
         self.label_smoothing = label_smoothing
 
         self.ssim_loss = SSIMLoss()
         self.lpips_loss = LPIPSLoss()
+
+    def codebook_diversity_loss(self, codes, n_codes=1024):
+        """
+        码本多样性损失：鼓励使用更多样的码字，防止码本崩溃。
+        codes: (B, D) 离散 token 索引
+        返回: 标量损失（越小越好，表示分布越均匀）
+        """
+        B, D = codes.shape
+        device = codes.device
+
+        diversity_losses = []
+        for d in range(D):
+            # 统计每个码字在当前层的使用频率
+            layer_codes = codes[:, d]
+            hist = torch.histc(layer_codes.float(), bins=n_codes, min=0, max=n_codes-1)
+
+            # 计算分布的熵
+            prob = hist / (hist.sum() + 1e-10)
+            entropy = -(prob * torch.log(prob + 1e-10)).sum()
+
+            # 最大熵（均匀分布）
+            max_entropy = math.log(n_codes)
+
+            # 损失：鼓励高熵（均匀分布）
+            diversity_losses.append(max_entropy - entropy)
+
+        return torch.stack(diversity_losses).mean()
 
     def forward(self, outputs, stage=1):
         """
@@ -140,15 +169,25 @@ class TopoVarADLoss(nn.Module):
         else:
             loss_rqvae = outputs.get('loss_rqvae', torch.tensor(0.0))
             loss_ar = outputs.get('loss_ar', torch.tensor(0.0))
+
+            # 计算码本多样性损失
+            codes = outputs.get('codes', None)
+            if codes is not None:
+                loss_diversity = self.codebook_diversity_loss(codes)
+            else:
+                loss_diversity = torch.tensor(0.0, device=loss_pixel.device)
+
             total = (loss_pixel
                      + self.lambda_lpips * loss_lpips
                      + self.lambda_rqvae * loss_rqvae
-                     + self.lambda_ar * loss_ar)
+                     + self.lambda_ar * loss_ar
+                     + self.lambda_diversity * loss_diversity)
             return {
                 'loss_pixel': loss_pixel,
                 'loss_lpips': loss_lpips,
                 'loss_rqvae': loss_rqvae,
                 'loss_ar': loss_ar,
+                'loss_diversity': loss_diversity,
                 'loss_total': total,
             }
 

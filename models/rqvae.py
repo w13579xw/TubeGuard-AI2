@@ -6,14 +6,17 @@ import torch.nn.functional as F
 class VectorQuantizer(nn.Module):
     """
     向量量化器：维护码本，执行最近邻查找 + EMA码本更新。
+    支持动态调整 decay 以适应训练不同阶段。
     """
 
-    def __init__(self, n_codes=1024, d_code=32, commitment_cost=0.25, decay=0.99):
+    def __init__(self, n_codes=1024, d_code=32, commitment_cost=0.25, decay=0.99, min_decay=0.9):
         super().__init__()
         self.n_codes = n_codes
         self.d_code = d_code
         self.commitment_cost = commitment_cost
         self.decay = decay
+        self.min_decay = min_decay
+        self.training_step = 0
 
         embedding = torch.randn(n_codes, d_code) * 0.02
         self.register_buffer('embedding', embedding)
@@ -38,13 +41,22 @@ class VectorQuantizer(nn.Module):
         z_q = F.embedding(codes, self.embedding)
 
         if self.training:
+            # 动态调整 decay：训练早期使用较低的 decay 以快速适应
+            # 随着训练进行，逐渐提高 decay 以稳定码本
+            self.training_step += 1
+            warmup_steps = 5000  # 前5000步逐渐从 min_decay 增加到 decay
+            if self.training_step < warmup_steps:
+                current_decay = self.min_decay + (self.decay - self.min_decay) * (self.training_step / warmup_steps)
+            else:
+                current_decay = self.decay
+
             with torch.no_grad():
                 one_hot = F.one_hot(codes, self.n_codes).float()
                 count = one_hot.sum(dim=0)
-                self.ema_count.mul_(self.decay).add_(count, alpha=1 - self.decay)
+                self.ema_count.mul_(current_decay).add_(count, alpha=1 - current_decay)
 
                 weight_sum = one_hot.t() @ z
-                self.ema_weight.mul_(self.decay).add_(weight_sum, alpha=1 - self.decay)
+                self.ema_weight.mul_(current_decay).add_(weight_sum, alpha=1 - current_decay)
 
                 n = self.ema_count.sum()
                 self.ema_count.clamp_(min=1e-5)
@@ -66,7 +78,7 @@ class ResidualQuantizer(nn.Module):
     每层对上一层的残差进行量化，捕获从粗到细的语义信息。
     """
 
-    def __init__(self, d_model=256, n_codes=1024, d_code=32, n_layers=8, commitment_cost=0.25, decay=0.99):
+    def __init__(self, d_model=256, n_codes=1024, d_code=32, n_layers=8, commitment_cost=0.25, decay=0.99, min_decay=0.9):
         super().__init__()
         self.d_model = d_model
         self.n_codes = n_codes
@@ -77,7 +89,7 @@ class ResidualQuantizer(nn.Module):
         self.proj_out = nn.Linear(d_code, d_model)
 
         self.quantizers = nn.ModuleList([
-            VectorQuantizer(n_codes, d_code, commitment_cost, decay)
+            VectorQuantizer(n_codes, d_code, commitment_cost, decay, min_decay)
             for _ in range(n_layers)
         ])
 
