@@ -15,7 +15,7 @@ train:
   stage2_epochs: 150
   batch_size: 16
   lr_stage1: 1.0e-4
-  lr_stage2: 1.0e-5  # 降低学习率以提高稳定性
+  lr_stage2: 5.0e-6  # 进一步降低学习率，避免Epoch 9崩溃
   weight_decay: 0.05
   warmup_epochs: 10
   lambda_lpips: 0.1
