@@ -15,13 +15,13 @@ train:
   stage2_epochs: 150
   batch_size: 16
   lr_stage1: 1.0e-4
-  lr_stage2: 1.0e-5  # 使用动态EMA decay和多样性损失后，可以使用稍高的学习率
+  lr_stage2: 1.0e-5  # 使用动态EMA decay，无需多样性损失
   weight_decay: 0.05
   warmup_epochs: 10
   lambda_lpips: 0.1
   lambda_rqvae: 0.5
   lambda_ar: 1.0
-  lambda_diversity: 0.01  # 码本多样性损失权重
+  lambda_diversity: 0.0  # 关闭多样性损失（副作用太大）
   checkpoint_dir: checkpoints/
   log_dir: logs/
   augment: true
