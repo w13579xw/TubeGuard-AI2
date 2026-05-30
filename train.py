@@ -273,6 +273,7 @@ def main():
         lambda_lpips=train_config.get('lambda_lpips', 0.1),
         lambda_rqvae=train_config.get('lambda_rqvae', 0.5),
         lambda_ar=train_config.get('lambda_ar', 1.0),
+        lambda_diversity=train_config.get('lambda_diversity', 0.0),
         label_smoothing=train_config.get('label_smoothing', 0.1),
     ).to(device)
 
