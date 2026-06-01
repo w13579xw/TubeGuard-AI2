@@ -33,6 +33,7 @@ from data.dataset import CSVDataset
 from utils.metrics import compute_auroc, compute_f1_max, compute_auprc
 from benchmark.methods import (
     PaDiM, PatchCore, AutoencoderBaseline,
+    RD4AD, EfficientAD,
     build_train_loader, build_test_loader, evaluate_method
 )
 
@@ -164,6 +165,36 @@ def run_autoencoder(config, train_loader, test_loader, device):
     return results
 
 
+def run_rd4ad(config, train_loader, test_loader, device):
+    """Run RD4AD (Reverse Distillation) benchmark."""
+    print("\n" + "=" * 60)
+    print("  Running RD4AD Benchmark")
+    print("=" * 60)
+
+    rd4ad = RD4AD(device=device)
+    rd4ad.fit(train_loader, epochs=60, lr=0.005)
+
+    image_scores, pixel_maps, labels = rd4ad.predict(test_loader)
+    masks_list = [batch['mask'].squeeze().numpy() for batch in test_loader if batch['mask'].sum() > 0]
+    results = evaluate_method(image_scores, pixel_maps, labels, masks_list, 'RD4AD')
+    return results
+
+
+def run_efficientad(config, train_loader, test_loader, device):
+    """Run EfficientAD (simplified teacher-student) benchmark."""
+    print("\n" + "=" * 60)
+    print("  Running EfficientAD Benchmark")
+    print("=" * 60)
+
+    ead = EfficientAD(device=device)
+    ead.fit(train_loader, epochs=60, lr=1e-3)
+
+    image_scores, pixel_maps, labels = ead.predict(test_loader)
+    masks_list = [batch['mask'].squeeze().numpy() for batch in test_loader if batch['mask'].sum() > 0]
+    results = evaluate_method(image_scores, pixel_maps, labels, masks_list, 'EfficientAD')
+    return results
+
+
 def run_topovarad_stage1(config, test_loader, device):
     """Run TopoVarAD Stage 1 benchmark (reconstruction error)."""
     print("\n" + "=" * 60)
@@ -238,8 +269,8 @@ def main():
     parser.add_argument('--config', type=str, default='configs/default.yaml')
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--methods', type=str, nargs='+',
-                        default=['padim', 'patchcore', 'ae', 'topovarad_s1'],
-                        choices=['padim', 'patchcore', 'ae', 'topovarad_s1', 'all'],
+                        default=['padim', 'patchcore', 'ae', 'rd4ad', 'efficientad', 'topovarad_s1'],
+                        choices=['padim', 'patchcore', 'ae', 'rd4ad', 'efficientad', 'topovarad_s1', 'all'],
                         help='Methods to benchmark')
     parser.add_argument('--output', type=str, default='logs/benchmark_results.json')
     args = parser.parse_args()
@@ -254,7 +285,7 @@ def main():
     print(f"Train batches: {len(train_loader)}, Test batches: {len(test_loader)}")
 
     if 'all' in args.methods:
-        args.methods = ['padim', 'patchcore', 'ae', 'topovarad_s1']
+        args.methods = ['padim', 'patchcore', 'ae', 'rd4ad', 'efficientad', 'topovarad_s1']
 
     all_results = {}
 
@@ -266,6 +297,10 @@ def main():
                 results = run_patchcore(config, train_loader, test_loader, device)
             elif method == 'ae':
                 results = run_autoencoder(config, train_loader, test_loader, device)
+            elif method == 'rd4ad':
+                results = run_rd4ad(config, train_loader, test_loader, device)
+            elif method == 'efficientad':
+                results = run_efficientad(config, train_loader, test_loader, device)
             elif method == 'topovarad_s1':
                 results = run_topovarad_stage1(config, test_loader, device)
             else:

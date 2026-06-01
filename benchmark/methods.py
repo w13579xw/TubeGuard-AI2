@@ -404,6 +404,257 @@ class AutoencoderBaseline(nn.Module):
 
 
 # ============================================================
+# RD4AD: Reverse Distillation for Anomaly Detection
+# (Deng & Li, CVPR 2022)
+# ============================================================
+
+class RD4ADTeacher(nn.Module):
+    """Pre-trained ResNet-18 encoder as teacher."""
+
+    def __init__(self):
+        super().__init__()
+        resnet = tv_models.resnet18(weights=tv_models.ResNet18_Weights.IMAGENET1K_V1)
+        self.enc0 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool)
+        self.enc1 = resnet.layer1  # 64 dims
+        self.enc2 = resnet.layer2  # 128 dims
+        self.enc3 = resnet.layer3  # 256 dims
+
+        for p in self.parameters():
+            p.requires_grad = False
+
+    def forward(self, x):
+        f0 = self.enc0(x)
+        f1 = self.enc1(f0)
+        f2 = self.enc2(f1)
+        f3 = self.enc3(f2)
+        return [f1, f2, f3]
+
+
+class RD4ADStudent(nn.Module):
+    """Decoder that reconstructs teacher features in reverse order."""
+
+    def __init__(self):
+        super().__init__()
+        # Bottleneck compression
+        self.bottleneck = nn.Conv2d(256, 512, 1)
+
+        # Decoder (reverse of ResNet layers)
+        self.dec2 = nn.Sequential(
+            nn.Conv2d(512, 256, 3, 1, 1), nn.BatchNorm2d(256), nn.ReLU(),
+            nn.Conv2d(256, 128, 3, 1, 1), nn.BatchNorm2d(128), nn.ReLU(),
+        )
+        self.dec1 = nn.Sequential(
+            nn.Conv2d(128, 128, 3, 1, 1), nn.BatchNorm2d(128), nn.ReLU(),
+            nn.Conv2d(128, 64, 3, 1, 1), nn.BatchNorm2d(64), nn.ReLU(),
+        )
+
+    def forward(self, f3):
+        b = self.bottleneck(f3)
+        d2 = self.dec2(b)   # reconstruct f2
+        d1 = self.dec1(d2)  # reconstruct f1
+        return [d1, d2]
+
+
+class RD4AD:
+    """
+    RD4AD: Reverse Distillation for Anomaly Detection.
+    Teacher (frozen ResNet-18) → Student decoder reconstructs features.
+    Anomaly = cosine distance between teacher and student feature maps.
+
+    Reference: Deng & Li, CVPR 2022
+    """
+
+    def __init__(self, device='cuda'):
+        self.device = torch.device(device)
+        self.teacher = RD4ADTeacher().to(self.device).eval()
+        self.student = RD4ADStudent().to(self.device)
+
+    def fit(self, train_loader, epochs=60, lr=0.005):
+        """Train student decoder to reconstruct teacher features."""
+        self.teacher.eval()
+        self.student.train()
+        optimizer = optim.AdamW(self.student.parameters(), lr=lr, weight_decay=0.05)
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+
+        print(f"RD4AD: training student ({epochs} epochs, lr={lr})")
+        pbar = tqdm(range(epochs), desc='RD4AD training')
+        best_loss = float('inf')
+
+        for epoch in pbar:
+            total_loss = 0.0
+            for batch in train_loader:
+                images = batch['image'].to(self.device)
+                with torch.no_grad():
+                    teacher_feats = self.teacher(images)  # [f1, f2, f3]
+                student_feats = self.student(teacher_feats[-1])  # [d1, d2]
+
+                # MSE loss on all feature levels
+                loss = F.mse_loss(student_feats[0], teacher_feats[0]) + \
+                       F.mse_loss(student_feats[1], teacher_feats[1])
+                # Add cosine distance loss for better alignment
+                T1 = F.normalize(teacher_feats[0].flatten(1), dim=1)
+                S1 = F.normalize(student_feats[0].flatten(1), dim=1)
+                loss = loss + 0.5 * (1 - (T1 * S1).sum(dim=1)).mean()
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item()
+
+            scheduler.step()
+            avg_loss = total_loss / len(train_loader)
+            if avg_loss < best_loss:
+                best_loss = avg_loss
+            pbar.set_postfix({'loss': f'{avg_loss:.4f}', 'best': f'{best_loss:.4f}'})
+
+        return self
+
+    @torch.no_grad()
+    def predict(self, loader):
+        """Compute feature discrepancy as anomaly score."""
+        self.teacher.eval()
+        self.student.eval()
+        image_scores = []
+        pixel_scores_list = []
+        all_labels = []
+
+        for batch in tqdm(loader, desc='RD4AD: predicting'):
+            images = batch['image'].to(self.device)
+            labels = batch['label']
+            teacher_feats = self.teacher(images)
+            student_feats = self.student(teacher_feats[-1])
+
+            # Cosine distance at each level
+            T = F.normalize(teacher_feats[0].flatten(2), dim=1)  # (B, C, HW)
+            S = F.normalize(student_feats[0].flatten(2), dim=1)
+            cos_dist = 1 - (T * S).sum(dim=1)  # (B, HW)
+
+            B, C, H, W = teacher_feats[0].shape
+            anomaly_map = cos_dist.reshape(B, H, W)
+
+            img_score = anomaly_map.reshape(B, -1).max(dim=1).values
+            image_scores.extend(img_score.cpu().tolist())
+            all_labels.extend(labels.tolist())
+
+            for j in range(B):
+                pmap = anomaly_map[j].unsqueeze(0).unsqueeze(0).float()
+                pmap = F.interpolate(pmap, size=(512, 512), mode='bilinear', align_corners=False)
+                pixel_scores_list.append(pmap.squeeze().cpu().numpy())
+
+        return np.array(image_scores), pixel_scores_list, np.array(all_labels)
+
+
+# ============================================================
+# EfficientAD (simplified teacher-student feature matching)
+# (Batzner et al., WACV 2024)
+# ============================================================
+
+class EfficientADStudent(nn.Module):
+    """Lightweight student for feature distillation."""
+
+    def __init__(self, in_channels=3):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(in_channels, 32, 4, 2, 1), nn.BatchNorm2d(32), nn.LeakyReLU(0.2),
+            nn.Conv2d(32, 64, 4, 2, 1), nn.BatchNorm2d(64), nn.LeakyReLU(0.2),
+            nn.Conv2d(64, 128, 4, 2, 1), nn.BatchNorm2d(128), nn.LeakyReLU(0.2),
+            nn.Conv2d(128, 256, 4, 2, 1), nn.BatchNorm2d(256), nn.LeakyReLU(0.2),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class EfficientAD:
+    """
+    EfficientAD: Lightweight teacher-student anomaly detection.
+    Teacher: frozen WideResNet-50. Student: small CNN trained via feature
+    distillation on normal samples. Anomaly scored by feature discrepancy.
+
+    Reference: Batzner et al., WACV 2024
+    """
+
+    def __init__(self, device='cuda'):
+        self.device = torch.device(device)
+        self.teacher = WideResNet50FeatureExtractor().to(self.device).eval()
+        for p in self.teacher.parameters():
+            p.requires_grad = False
+        self.student = EfficientADStudent().to(self.device)
+
+    def fit(self, train_loader, epochs=60, lr=1e-3):
+        """Train student to match teacher features."""
+        self.teacher.eval()
+        self.student.train()
+        optimizer = optim.AdamW(self.student.parameters(), lr=lr, weight_decay=0.05)
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+
+        print(f"EfficientAD: training student ({epochs} epochs, lr={lr})")
+        pbar = tqdm(range(epochs), desc='EfficientAD training')
+        best_loss = float('inf')
+
+        for epoch in pbar:
+            total_loss = 0.0
+            for batch in train_loader:
+                images = batch['image'].to(self.device)
+                with torch.no_grad():
+                    teacher_feats = self.teacher(images)
+                    # Use layer2 output, pool to match student spatial size
+                    t_feat = F.adaptive_avg_pool2d(teacher_feats[0], (16, 16))
+
+                s_feat = self.student(images)
+                # Feature distillation loss (cosine + MSE)
+                loss = F.mse_loss(s_feat, t_feat) + \
+                       0.3 * (1 - F.cosine_similarity(
+                           s_feat.flatten(1), t_feat.flatten(1), dim=1)).mean()
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item()
+
+            scheduler.step()
+            avg_loss = total_loss / len(train_loader)
+            if avg_loss < best_loss:
+                best_loss = avg_loss
+            pbar.set_postfix({'loss': f'{avg_loss:.4f}', 'best': f'{best_loss:.4f}'})
+
+        return self
+
+    @torch.no_grad()
+    def predict(self, loader):
+        """Feature discrepancy as anomaly score."""
+        self.teacher.eval()
+        self.student.eval()
+        image_scores = []
+        pixel_scores_list = []
+        all_labels = []
+
+        for batch in tqdm(loader, desc='EfficientAD: predicting'):
+            images = batch['image'].to(self.device)
+            labels = batch['label']
+            teacher_feats = self.teacher(images)
+            t_feat = F.adaptive_avg_pool2d(teacher_feats[0], (16, 16))
+            s_feat = self.student(images)
+
+            # Per-location cosine distance
+            t_norm = F.normalize(t_feat.flatten(2), dim=1)  # (B, C, HW)
+            s_norm = F.normalize(s_feat.flatten(2), dim=1)
+            anomaly_map = 1 - (t_norm * s_norm).sum(dim=1)  # (B, HW)
+            anomaly_map = anomaly_map.reshape(images.shape[0], 16, 16)
+
+            img_score = anomaly_map.reshape(images.shape[0], -1).max(dim=1).values
+            image_scores.extend(img_score.cpu().tolist())
+            all_labels.extend(labels.tolist())
+
+            for j in range(images.shape[0]):
+                pmap = anomaly_map[j].unsqueeze(0).unsqueeze(0).float()
+                pmap = F.interpolate(pmap, size=(512, 512), mode='bilinear', align_corners=False)
+                pixel_scores_list.append(pmap.squeeze().cpu().numpy())
+
+        return np.array(image_scores), pixel_scores_list, np.array(all_labels)
+
+
+# ============================================================
 # Utility functions
 # ============================================================
 

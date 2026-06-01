@@ -19,6 +19,18 @@ methods:
     lr: 1.0e-3
     batch_size: 16
 
+  rd4ad:
+    teacher: resnet18
+    epochs: 60
+    lr: 5.0e-3
+    batch_size: 16
+
+  efficientad:
+    teacher: wideresnet50
+    epochs: 60
+    lr: 1.0e-3
+    batch_size: 16
+
   topovarad_stage1:
     checkpoint: checkpoints/stage1_best.pth
     batch_size: 1
