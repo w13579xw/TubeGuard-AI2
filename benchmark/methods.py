@@ -88,88 +88,80 @@ class PaDiM:
     Fits multivariate Gaussian distributions to patch features and uses
     Mahalanobis distance as anomaly score.
 
+    Memory-efficient: features are pooled to a small spatial grid (16x16)
+    and computed online via Welford's algorithm for mean and covariance.
+
     Reference: Defard et al., ICPR 2021
     """
 
-    def __init__(self, backbone='resnet18', device='cuda'):
+    def __init__(self, backbone='resnet18', device='cuda', pool_size=16, max_train_samples=800):
         self.device = torch.device(device)
         self.backbone = backbone
+        self.pool_size = pool_size
+        self.max_train_samples = max_train_samples
         self.model = ResNet18FeatureExtractor().to(self.device).eval()
 
     @torch.no_grad()
-    def _extract_features(self, loader, max_samples=None):
-        """Extract and aggregate multi-layer features from training data."""
-        features_per_layer = {}
-        total = 0
+    def fit(self, train_loader):
+        """Fit multivariate Gaussian distributions using Welford's online algorithm."""
+        print(f"PaDiM: fitting (pool={self.pool_size}, max_samples={self.max_train_samples})...")
 
-        for batch in tqdm(loader, desc='PaDiM: extracting features'):
+        # Online mean/covariance accumulators per layer
+        stats = {}  # {layer_idx: {'n': int, 'mean': array, 'M2': array}}
+        total_images = 0
+
+        for batch in tqdm(train_loader, desc='PaDiM: extracting'):
             images = batch['image'].to(self.device)
             feats = self.model(images)
 
-            # Spatial average pooling to align spatial dims, then concatenate
-            # We use adaptive pooling to a common size (e.g., 1/32 of input)
+            # Pool all layers to same small spatial grid
             for i, f in enumerate(feats):
-                if i == 0:
-                    f_pooled = F.adaptive_avg_pool2d(f, (f.shape[2], f.shape[3]))
+                f_pooled = F.adaptive_avg_pool2d(f, (self.pool_size, self.pool_size))  # (B, C, Hp, Wp)
+                B, C, Hp, Wp = f_pooled.shape
+                # Randomly subsample spatial positions to save memory
+                n_positions = Hp * Wp
+                n_sample_pos = min(n_positions, 64)  # sample 64 positions per image
+                rand_idx = torch.randperm(n_positions, device=self.device)[:n_sample_pos]
+
+                f_flat = f_pooled.reshape(B, C, -1)[:, :, rand_idx]  # (B, C, n_sample_pos)
+                f_flat = f_flat.permute(0, 2, 1).reshape(-1, C)      # (B*n_sample_pos, C)
+
+                # Welford's online algorithm
+                f_np = f_flat.cpu().numpy()
+                batch_n = f_np.shape[0]
+                batch_mean = f_np.mean(axis=0)
+                batch_centered = f_np - batch_mean
+
+                if i not in stats:
+                    stats[i] = {'n': batch_n, 'mean': batch_mean,
+                                'M2': batch_centered.T @ batch_centered}
                 else:
-                    f_pooled = F.adaptive_avg_pool2d(f, (feats[0].shape[2], feats[0].shape[3]))
+                    # Merge with existing stats (Chan's method)
+                    delta = batch_mean - stats[i]['mean']
+                    M2_new = batch_centered.T @ batch_centered
+                    stats[i]['M2'] = stats[i]['M2'] + M2_new + \
+                        delta[:, None] @ delta[None, :] * (stats[i]['n'] * batch_n / (stats[i]['n'] + batch_n))
+                    stats[i]['mean'] = (stats[i]['n'] * stats[i]['mean'] + batch_n * batch_mean) / (stats[i]['n'] + batch_n)
+                    stats[i]['n'] += batch_n
 
-                # Move to CPU to save GPU memory
-                f_np = f_pooled.cpu().numpy()  # (B, C, H, W)
-                B, C, H, W = f_np.shape
-                f_flat = f_np.reshape(B, C, H * W).transpose(0, 2, 1).reshape(-1, C)  # (B*H*W, C)
-
-                if i not in features_per_layer:
-                    features_per_layer[i] = []
-                features_per_layer[i].append(f_flat)
-
-            total += images.shape[0]
-            if max_samples and total >= max_samples:
+            total_images += images.shape[0]
+            if total_images >= self.max_train_samples:
                 break
 
-        # Concatenate across batches
-        for i in features_per_layer:
-            features_per_layer[i] = np.concatenate(features_per_layer[i], axis=0)
-
-        return features_per_layer
-
-    @torch.no_grad()
-    def fit(self, train_loader):
-        """Fit multivariate Gaussian distributions to training features."""
-        print("PaDiM: fitting distributions...")
-        features = self._extract_features(train_loader)
-
+        # Compute inverse covariances
         self.means = {}
         self.inv_covs = {}
+        reg = 0.01  # Regularization
 
-        for layer_idx, feats in features.items():
-            # Random projection for dimensionality reduction (PaDiM paper)
-            d = feats.shape[1]
-            target_d = min(d, 550)  # Limit dimension for covariance invertibility
-
-            # Subsample for computational efficiency
-            n_samples = min(feats.shape[0], 20000)
-            indices = np.random.choice(feats.shape[0], n_samples, replace=False)
-            feats_sub = feats[indices]
-
-            # PCA-like dimension reduction using covariance
-            mean = feats_sub.mean(axis=0, keepdims=True)
-            feats_centered = feats_sub - mean
-            cov = np.cov(feats_centered.T)
-
-            # Add regularization for invertibility
-            cov_reg = cov + 0.01 * np.eye(cov.shape[0])
-
-            # Invert
+        for layer_idx, s in stats.items():
+            cov = s['M2'] / (s['n'] - 1)
+            cov_reg = cov + reg * np.eye(cov.shape[0])
+            self.means[layer_idx] = s['mean'].reshape(1, -1)
             try:
-                inv_cov = np.linalg.inv(cov_reg)
+                self.inv_covs[layer_idx] = np.linalg.inv(cov_reg)
             except np.linalg.LinAlgError:
-                inv_cov = np.linalg.pinv(cov_reg)
-
-            self.means[layer_idx] = mean
-            self.inv_covs[layer_idx] = inv_cov
-
-            print(f"  Layer {layer_idx}: dim={d}, samples={n_samples}")
+                self.inv_covs[layer_idx] = np.linalg.pinv(cov_reg)
+            print(f"  Layer {layer_idx}: dim={c_reg.shape[0]}, n={s['n']}")
 
         return self
 
@@ -180,42 +172,30 @@ class PaDiM:
         image_scores = []
         pixel_scores_list = []
         all_labels = []
+        Hp = Wp = self.pool_size
 
         for batch in tqdm(loader, desc='PaDiM: predicting'):
             images = batch['image'].to(self.device)
             labels = batch['label']
             feats = self.model(images)
 
-            batch_mahalanobis = None
+            batch_mahalanobis = np.zeros((images.shape[0], Hp, Wp))
             for i, f in enumerate(feats):
                 if i not in self.means:
                     continue
-
-                if batch_mahalanobis is None:
-                    _, _, H_ref, W_ref = f.shape
-                else:
-                    f = F.adaptive_avg_pool2d(f, (H_ref, W_ref))
-
-                B, C, H, W = f.shape
-                f_flat = f.reshape(B, C, H * W).transpose(1, 2).reshape(B * H * W, C).cpu().numpy()
+                f_pooled = F.adaptive_avg_pool2d(f, (Hp, Wp))
+                B, C, _, _ = f_pooled.shape
+                f_flat = f_pooled.reshape(B, C, -1).permute(0, 2, 1).reshape(-1, C).cpu().numpy()
                 f_centered = f_flat - self.means[i]
                 mahalanobis = np.sum(f_centered * (f_centered @ self.inv_covs[i]), axis=1)
-                mahalanobis_map = mahalanobis.reshape(B, H, W)
+                batch_mahalanobis += mahalanobis.reshape(B, Hp, Wp)
 
-                if batch_mahalanobis is None:
-                    batch_mahalanobis = mahalanobis_map
-                else:
-                    batch_mahalanobis += mahalanobis_map
-
-            # Image-level: max anomaly score
-            img_score = batch_mahalanobis.reshape(B, -1).max(axis=1)
+            img_score = batch_mahalanobis.reshape(images.shape[0], -1).max(axis=1)
             image_scores.extend(img_score.tolist())
             all_labels.extend(labels.tolist())
 
-            # Pixel-level: upsample to original
-            for j in range(B):
-                pmap = batch_mahalanobis[j]
-                pmap = torch.tensor(pmap).unsqueeze(0).unsqueeze(0).float()
+            for j in range(images.shape[0]):
+                pmap = torch.tensor(batch_mahalanobis[j]).unsqueeze(0).unsqueeze(0).float()
                 pmap = F.interpolate(pmap, size=(512, 512), mode='bilinear', align_corners=False)
                 pixel_scores_list.append(pmap.squeeze().cpu().numpy())
 
@@ -235,33 +215,51 @@ class PatchCore:
     Reference: Roth et al., CVPR 2022
     """
 
-    def __init__(self, backbone='wideresnet50', coreset_ratio=0.01, device='cuda'):
+    def __init__(self, backbone='wideresnet50', coreset_ratio=0.01, device='cuda',
+                 pool_size=16, max_train_samples=500):
         self.device = torch.device(device)
         self.coreset_ratio = coreset_ratio
+        self.pool_size = pool_size
+        self.max_train_samples = max_train_samples
         self.extractor = WideResNet50FeatureExtractor().to(self.device).eval()
 
     @torch.no_grad()
     def _extract_features(self, loader):
-        """Extract patch features from training data."""
+        """Extract patch features from training data (memory-efficient)."""
         all_features = []
+        total_images = 0
 
         for batch in tqdm(loader, desc='PatchCore: extracting features'):
             images = batch['image'].to(self.device)
             feats = self.extractor(images)
 
-            # Concatenate layer outputs with adaptive pooling
+            # Pool to small spatial grid
             pooled_feats = []
-            target_size = feats[0].shape[2:]
             for f in feats:
-                f = F.adaptive_avg_pool2d(f, target_size)
+                f = F.adaptive_avg_pool2d(f, (self.pool_size, self.pool_size))
                 pooled_feats.append(f)
+            combined = torch.cat(pooled_feats, dim=1)
 
-            combined = torch.cat(pooled_feats, dim=1)  # (B, C_sum, H, W)
             B, C, H, W = combined.shape
-            patches = combined.permute(0, 2, 3, 1).reshape(-1, C)  # (B*H*W, C)
+            # Subsample spatial positions
+            n_positions = H * W
+            n_sample = min(n_positions, 32)
+            rand_idx = torch.randperm(n_positions, device=self.device)[:n_sample]
+            combined_flat = combined.reshape(B, C, -1)[:, :, rand_idx]
+            patches = combined_flat.permute(0, 2, 1).reshape(-1, C)
             all_features.append(patches.cpu())
 
-        return torch.cat(all_features, dim=0)
+            total_images += images.shape[0]
+            if total_images >= self.max_train_samples:
+                break
+
+        features = torch.cat(all_features, dim=0)
+        # Further random subsample if too many
+        if features.shape[0] > 100000:
+            idx = torch.randperm(features.shape[0])[:100000]
+            features = features[idx]
+        print(f"  Extracted {features.shape[0]} features (dim={features.shape[1]})")
+        return features
 
     def _greedy_coreset(self, features, n_coreset):
         """Greedy coreset selection as described in PatchCore paper."""
