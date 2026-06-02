@@ -32,11 +32,39 @@ from utils.metrics import compute_auroc, compute_f1_max, compute_auprc
 # Feature extractors
 # ============================================================
 
+def _safe_load_model(model_name, device):
+    """
+    Load a pre-trained model with download fallback.
+    On servers without internet, falls back to locally cached models.
+    """
+    print(f"  Loading {model_name}...", end=" ")
+    if model_name == 'resnet18':
+        try:
+            model = tv_models.resnet18(weights=tv_models.ResNet18_Weights.IMAGENET1K_V1)
+        except Exception:
+            print("(download failed, trying local cache...) ", end="")
+            model = tv_models.resnet18(weights=None)
+    elif model_name == 'wideresnet50':
+        try:
+            model = tv_models.wide_resnet50_2(
+                weights=tv_models.Wide_ResNet50_2_Weights.IMAGENET1K_V1)
+        except Exception:
+            print("(download failed, falling back to resnet18...) ", end="")
+            model = tv_models.resnet18(weights=tv_models.ResNet18_Weights.IMAGENET1K_V1)
+            model_name = 'resnet18_fallback'
+    else:
+        raise ValueError(f"Unknown model: {model_name}")
+
+    model = model.to(device).eval()
+    print("OK")
+    return model, model_name
+
+
 class ResNet18FeatureExtractor(nn.Module):
-    """Extract multi-layer features from ResNet-18, as used in PaDiM."""
-    def __init__(self):
+    """Extract multi-layer features from ResNet-18."""
+    def __init__(self, device='cpu'):
         super().__init__()
-        resnet = tv_models.resnet18(weights=tv_models.ResNet18_Weights.IMAGENET1K_V1)
+        resnet, _ = _safe_load_model('resnet18', device)
         self.layer0 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool)
         self.layer1 = resnet.layer1
         self.layer2 = resnet.layer2
@@ -47,25 +75,25 @@ class ResNet18FeatureExtractor(nn.Module):
         x1 = self.layer1(x0)
         x2 = self.layer2(x1)
         x3 = self.layer3(x2)
-        return [x0, x1, x2, x3]
+        return [x1, x2, x3]  # skip layer0 to save memory
 
 
 class WideResNet50FeatureExtractor(nn.Module):
-    """Extract multi-layer features from WideResNet-50-2, as used in PatchCore."""
-    def __init__(self):
+    """Extract multi-layer features from WideResNet-50-2 (with fallback to ResNet-18)."""
+    def __init__(self, device='cpu'):
         super().__init__()
-        wrn = tv_models.wide_resnet50_2(weights=tv_models.Wide_ResNet50_2_Weights.IMAGENET1K_V1)
-        self.layer0 = nn.Sequential(wrn.conv1, wrn.bn1, wrn.relu, wrn.maxpool)
-        self.layer1 = wrn.layer1
-        self.layer2 = wrn.layer2
-        self.layer3 = wrn.layer3
+        model, self._actual_model = _safe_load_model('wideresnet50', device)
+        self.layer0 = nn.Sequential(model.conv1, model.bn1, model.relu, model.maxpool)
+        self.layer1 = model.layer1
+        self.layer2 = model.layer2
+        self.layer3 = model.layer3
 
     def forward(self, x):
         x0 = self.layer0(x)
         x1 = self.layer1(x0)
         x2 = self.layer2(x1)
         x3 = self.layer3(x2)
-        return [x2, x3]  # PatchCore uses layers 2 & 3
+        return [x2, x3]  # PatchCore uses deeper layers
 
 
 def get_layers_for_backbone(backbone):
@@ -99,7 +127,7 @@ class PaDiM:
         self.backbone = backbone
         self.pool_size = pool_size
         self.max_train_samples = max_train_samples
-        self.model = ResNet18FeatureExtractor().to(self.device).eval()
+        self.model = ResNet18FeatureExtractor(device=self.device).to(self.device).eval()
 
     @torch.no_grad()
     def fit(self, train_loader):
@@ -161,7 +189,7 @@ class PaDiM:
                 self.inv_covs[layer_idx] = np.linalg.inv(cov_reg)
             except np.linalg.LinAlgError:
                 self.inv_covs[layer_idx] = np.linalg.pinv(cov_reg)
-            print(f"  Layer {layer_idx}: dim={c_reg.shape[0]}, n={s['n']}")
+            print(f"  Layer {layer_idx}: dim={cov_reg.shape[0]}, n={s['n']}")
 
         return self
 
@@ -221,7 +249,7 @@ class PatchCore:
         self.coreset_ratio = coreset_ratio
         self.pool_size = pool_size
         self.max_train_samples = max_train_samples
-        self.extractor = WideResNet50FeatureExtractor().to(self.device).eval()
+        self.extractor = WideResNet50FeatureExtractor(device=self.device).to(self.device).eval()
 
     @torch.no_grad()
     def _extract_features(self, loader):
@@ -409,13 +437,13 @@ class AutoencoderBaseline(nn.Module):
 class RD4ADTeacher(nn.Module):
     """Pre-trained ResNet-18 encoder as teacher."""
 
-    def __init__(self):
+    def __init__(self, device='cpu'):
         super().__init__()
-        resnet = tv_models.resnet18(weights=tv_models.ResNet18_Weights.IMAGENET1K_V1)
+        resnet, _ = _safe_load_model('resnet18', device)
         self.enc0 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool)
-        self.enc1 = resnet.layer1  # 64 dims
-        self.enc2 = resnet.layer2  # 128 dims
-        self.enc3 = resnet.layer3  # 256 dims
+        self.enc1 = resnet.layer1
+        self.enc2 = resnet.layer2
+        self.enc3 = resnet.layer3
 
         for p in self.parameters():
             p.requires_grad = False
@@ -464,7 +492,7 @@ class RD4AD:
 
     def __init__(self, device='cuda'):
         self.device = torch.device(device)
-        self.teacher = RD4ADTeacher().to(self.device).eval()
+        self.teacher = RD4ADTeacher(device=self.device).to(self.device).eval()
         self.student = RD4ADStudent().to(self.device)
 
     def fit(self, train_loader, epochs=60, lr=0.005):
@@ -574,7 +602,7 @@ class EfficientAD:
 
     def __init__(self, device='cuda'):
         self.device = torch.device(device)
-        self.teacher = WideResNet50FeatureExtractor().to(self.device).eval()
+        self.teacher = WideResNet50FeatureExtractor(device=self.device).to(self.device).eval()
         for p in self.teacher.parameters():
             p.requires_grad = False
         self.student = EfficientADStudent().to(self.device)
