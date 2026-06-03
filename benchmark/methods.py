@@ -243,13 +243,17 @@ class PatchCore:
     Reference: Roth et al., CVPR 2022
     """
 
-    def __init__(self, backbone='wideresnet50', coreset_ratio=0.01, device='cuda',
+    def __init__(self, backbone='resnet18', coreset_ratio=0.01, device='cuda',
                  pool_size=16, max_train_samples=500):
         self.device = torch.device(device)
         self.coreset_ratio = coreset_ratio
         self.pool_size = pool_size
         self.max_train_samples = max_train_samples
-        self.extractor = WideResNet50FeatureExtractor(device=self.device).to(self.device).eval()
+
+        if backbone == 'wideresnet50':
+            self.extractor = WideResNet50FeatureExtractor(device=self.device).to(self.device).eval()
+        else:
+            self.extractor = ResNet18FeatureExtractor(device=self.device).to(self.device).eval()
 
     @torch.no_grad()
     def _extract_features(self, loader):

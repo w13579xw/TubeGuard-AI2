@@ -109,7 +109,8 @@ def run_patchcore(config, train_loader, test_loader, device):
     print("  Running PatchCore Benchmark")
     print("=" * 60)
 
-    patchcore = PatchCore(backbone='wideresnet50', coreset_ratio=0.01, device=device)
+    # Use resnet18 for stability (wideresnet50 may not be downloadable on offline servers)
+    patchcore = PatchCore(backbone='resnet18', coreset_ratio=0.01, device=device)
     t0 = time.time()
     patchcore.fit(train_loader)
     fit_time = time.time() - t0
@@ -203,6 +204,21 @@ def run_topovarad_stage1(config, test_loader, device):
 
     from models.topovarad import TopoVarAD, TopoVarADConfig
 
+    # Build batch_size=1 test loader: SLIC tokenizer treats the batch as a
+    # single pooled set of superpixels, so multi-image batches mix tokens
+    # from different images, producing meaningless reconstruction.
+    data_config = config.get('data', {})
+    test_dataset = CSVDataset(
+        csv_path=data_config.get('test_csv', 'data/test.csv'),
+        images_dir=data_config.get('images_dir', 'data/images'),
+        split='test',
+        image_size=data_config.get('image_size', 512),
+        augment=False,
+    )
+    test_loader_bs1 = DataLoader(test_dataset, batch_size=1, shuffle=False,
+                                 num_workers=data_config.get('num_workers', 2),
+                                 pin_memory=True)
+
     model_config = config.get('model', {})
     topo_config = TopoVarADConfig(
         d_model=model_config.get('d_model', 256),
@@ -222,7 +238,7 @@ def run_topovarad_stage1(config, test_loader, device):
     model.load_state_dict(ckpt['model_state_dict'])
     model.set_stage(1)
     model.eval()
-    print(f"  Loaded Stage 1 checkpoint: {ckpt_path}")
+    print(f"  Loaded Stage 1 checkpoint: {ckpt_path} (epoch {ckpt['epoch']+1})")
 
     image_scores = []
     pixel_maps = []
@@ -230,24 +246,25 @@ def run_topovarad_stage1(config, test_loader, device):
     all_masks = []
 
     t0 = time.time()
-    for batch in tqdm(test_loader, desc='TopoVarAD-S1: predicting'):
+    for batch in tqdm(test_loader_bs1, desc='TopoVarAD-S1: predicting'):
         images = batch['image'].to(device)
         labels = batch['label']
 
         with torch.no_grad():
             outputs = model(images)
-            x_recon = outputs['reconstructed']
-            x_resized = outputs['x_resized']
-            recon_error = torch.abs(x_recon - x_resized).mean(dim=1)  # (B, H, W)
-            img_score = recon_error.reshape(images.shape[0], -1).mean(dim=1)
+            x_recon = outputs['reconstructed']  # (1, 3, Hr, Wr) per-image
+            x_resized = outputs['x_resized']    # (1, 3, Hr, Wr)
+            # Per-pixel L1 → mean over channels and spatial dims
+            error = torch.abs(x_recon - x_resized)
+            img_score = error.mean()
+            pixel_error = error.mean(dim=1)  # (1, Hr, Wr)
 
-        image_scores.extend(img_score.cpu().tolist())
-        all_labels.extend(labels.tolist())
+        image_scores.append(img_score.item())
+        all_labels.append(labels.item())
 
-        for j in range(images.shape[0]):
-            pmap = recon_error[j].unsqueeze(0).unsqueeze(0)
-            pmap = F.interpolate(pmap.float(), size=(512, 512), mode='bilinear', align_corners=False)
-            pixel_maps.append(pmap.squeeze().cpu().numpy())
+        pmap = F.interpolate(pixel_error.unsqueeze(0), size=(512, 512),
+                            mode='bilinear', align_corners=False).squeeze()
+        pixel_maps.append(pmap.cpu().numpy())
 
         if batch['mask'].sum() > 0:
             all_masks.append(batch['mask'].squeeze().cpu().numpy())
