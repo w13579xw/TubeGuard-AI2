@@ -233,7 +233,12 @@ def run_topovarad_stage1(config, test_loader, device):
     )
     model = topo_config.build_model().to(device)
 
-    ckpt_path = config.get('train', {}).get('checkpoint_dir', 'checkpoints') + '/stage1_best.pth'
+    # Prefer normal-only checkpoint; fall back to stage1_best
+    ckpt_dir = config.get('train', {}).get('checkpoint_dir', 'checkpoints')
+    ckpt_path = os.path.join(ckpt_dir, 'stage1_normal_best.pth')
+    if not os.path.exists(ckpt_path):
+        ckpt_path = os.path.join(ckpt_dir, 'stage1_best.pth')
+        print("  (using stage1_best.pth — mixed normal+anomaly training)")
     ckpt = torch.load(ckpt_path, map_location=device)
     model.load_state_dict(ckpt['model_state_dict'])
     model.set_stage(1)
