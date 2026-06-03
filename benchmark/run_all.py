@@ -126,14 +126,15 @@ def run_patchcore(config, train_loader, test_loader, device):
     return results
 
 
-def run_autoencoder(config, train_loader, test_loader, device):
+def run_autoencoder(config, train_loader, test_loader, device, fast=False):
     """Run Autoencoder baseline."""
     print("\n" + "=" * 60)
     print("  Running Autoencoder Benchmark")
     print("=" * 60)
 
+    epochs = 20 if fast else 100
     model = AutoencoderBaseline(latent_dim=256).to(device)
-    model = train_autoencoder(model, train_loader, device, epochs=100, lr=1e-3)
+    model = train_autoencoder(model, train_loader, device, epochs=epochs, lr=1e-3)
     model.eval()
 
     image_scores = []
@@ -166,14 +167,15 @@ def run_autoencoder(config, train_loader, test_loader, device):
     return results
 
 
-def run_rd4ad(config, train_loader, test_loader, device):
+def run_rd4ad(config, train_loader, test_loader, device, fast=False):
     """Run RD4AD (Reverse Distillation) benchmark."""
     print("\n" + "=" * 60)
     print("  Running RD4AD Benchmark")
     print("=" * 60)
 
+    epochs = 15 if fast else 60
     rd4ad = RD4AD(device=device)
-    rd4ad.fit(train_loader, epochs=60, lr=0.005)
+    rd4ad.fit(train_loader, epochs=epochs, lr=0.005)
 
     image_scores, pixel_maps, labels = rd4ad.predict(test_loader)
     masks_list = [batch['mask'].squeeze().numpy() for batch in test_loader if batch['mask'].sum() > 0]
@@ -181,14 +183,15 @@ def run_rd4ad(config, train_loader, test_loader, device):
     return results
 
 
-def run_efficientad(config, train_loader, test_loader, device):
+def run_efficientad(config, train_loader, test_loader, device, fast=False):
     """Run EfficientAD (simplified teacher-student) benchmark."""
     print("\n" + "=" * 60)
     print("  Running EfficientAD Benchmark")
     print("=" * 60)
 
+    epochs = 15 if fast else 60
     ead = EfficientAD(device=device)
-    ead.fit(train_loader, epochs=60, lr=1e-3)
+    ead.fit(train_loader, epochs=epochs, lr=1e-3)
 
     image_scores, pixel_maps, labels = ead.predict(test_loader)
     masks_list = [batch['mask'].squeeze().numpy() for batch in test_loader if batch['mask'].sum() > 0]
@@ -291,10 +294,12 @@ def main():
     parser.add_argument('--config', type=str, default='configs/default.yaml')
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--methods', type=str, nargs='+',
-                        default=['padim', 'patchcore', 'ae', 'rd4ad', 'efficientad', 'topovarad_s1'],
+                        default=['padim', 'patchcore', 'ae', 'rd4ad', 'efficientad'],
                         choices=['padim', 'patchcore', 'ae', 'rd4ad', 'efficientad', 'topovarad_s1', 'all'],
                         help='Methods to benchmark')
     parser.add_argument('--output', type=str, default='logs/benchmark_results.json')
+    parser.add_argument('--fast', action='store_true',
+                        help='Fast mode: fewer epochs for training-based methods')
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -307,7 +312,7 @@ def main():
     print(f"Train batches: {len(train_loader)}, Test batches: {len(test_loader)}")
 
     if 'all' in args.methods:
-        args.methods = ['padim', 'patchcore', 'ae', 'rd4ad', 'efficientad', 'topovarad_s1']
+        args.methods = ['padim', 'patchcore', 'ae', 'rd4ad', 'efficientad']
 
     all_results = {}
 
@@ -318,11 +323,11 @@ def main():
             elif method == 'patchcore':
                 results = run_patchcore(config, train_loader, test_loader, device)
             elif method == 'ae':
-                results = run_autoencoder(config, train_loader, test_loader, device)
+                results = run_autoencoder(config, train_loader, test_loader, device, fast=args.fast)
             elif method == 'rd4ad':
-                results = run_rd4ad(config, train_loader, test_loader, device)
+                results = run_rd4ad(config, train_loader, test_loader, device, fast=args.fast)
             elif method == 'efficientad':
-                results = run_efficientad(config, train_loader, test_loader, device)
+                results = run_efficientad(config, train_loader, test_loader, device, fast=args.fast)
             elif method == 'topovarad_s1':
                 results = run_topovarad_stage1(config, test_loader, device)
             else:

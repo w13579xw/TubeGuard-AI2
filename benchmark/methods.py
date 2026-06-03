@@ -702,17 +702,25 @@ def build_test_loader(config):
                       num_workers=data_config.get('num_workers', 4), pin_memory=True)
 
 
-def build_train_loader(config):
-    """Build train data loader (normal-only for fitting)."""
+def build_train_loader(config, normal_only=True):
+    """Build train data loader. Default normal_only=True for proper AD."""
     data_config = config.get('data', {})
-    train_dataset = CSVDataset(
+    full_dataset = CSVDataset(
         csv_path=data_config.get('train_csv', 'data/train.csv'),
         images_dir=data_config.get('images_dir', 'data/images'),
         split='train',
         image_size=data_config.get('image_size', 512),
         augment=False,
     )
-    return DataLoader(train_dataset, batch_size=16, shuffle=False,
+    total = len(full_dataset)
+    if normal_only:
+        normal_idx = [i for i, (_, lbl) in enumerate(full_dataset.samples) if lbl == 0]
+        dataset = torch.utils.data.Subset(full_dataset, normal_idx)
+        print(f"  Training: {len(normal_idx)} normal-only (from {total} total)")
+    else:
+        dataset = full_dataset
+        print(f"  Training: {total} samples (mixed)")
+    return DataLoader(dataset, batch_size=16, shuffle=normal_only,
                       num_workers=data_config.get('num_workers', 4), pin_memory=True)
 
 
