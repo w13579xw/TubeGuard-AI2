@@ -19,6 +19,7 @@ from collections import OrderedDict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim as optim
 from torch.utils.data import DataLoader
 import torchvision.models as tv_models
 from scipy.ndimage import gaussian_filter
@@ -244,11 +245,12 @@ class PatchCore:
     """
 
     def __init__(self, backbone='resnet18', coreset_ratio=0.01, device='cuda',
-                 pool_size=16, max_train_samples=500):
+                 pool_size=16, max_train_samples=500, n_spatial_sample=128):
         self.device = torch.device(device)
         self.coreset_ratio = coreset_ratio
         self.pool_size = pool_size
         self.max_train_samples = max_train_samples
+        self.n_spatial_sample = n_spatial_sample
 
         if backbone == 'wideresnet50':
             self.extractor = WideResNet50FeatureExtractor(device=self.device).to(self.device).eval()
@@ -275,7 +277,7 @@ class PatchCore:
             B, C, H, W = combined.shape
             # Subsample spatial positions
             n_positions = H * W
-            n_sample = min(n_positions, 32)
+            n_sample = min(n_positions, self.n_spatial_sample)
             rand_idx = torch.randperm(n_positions, device=self.device)[:n_sample]
             combined_flat = combined.reshape(B, C, -1)[:, :, rand_idx]
             patches = combined_flat.permute(0, 2, 1).reshape(-1, C)

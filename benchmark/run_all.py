@@ -87,7 +87,7 @@ def run_padim(config, train_loader, test_loader, device):
     print("  Running PaDiM Benchmark")
     print("=" * 60)
 
-    padim = PaDiM(backbone='resnet18', device=device)
+    padim = PaDiM(backbone='resnet18', device=device, max_train_samples=800)
     t0 = time.time()
     padim.fit(train_loader)
     fit_time = time.time() - t0
@@ -110,7 +110,8 @@ def run_patchcore(config, train_loader, test_loader, device):
     print("=" * 60)
 
     # Use resnet18 for stability (wideresnet50 may not be downloadable on offline servers)
-    patchcore = PatchCore(backbone='resnet18', coreset_ratio=0.01, device=device)
+    patchcore = PatchCore(backbone='resnet18', coreset_ratio=0.01, device=device,
+                          max_train_samples=800, pool_size=32)
     t0 = time.time()
     patchcore.fit(train_loader)
     fit_time = time.time() - t0
@@ -152,7 +153,7 @@ def run_autoencoder(config, train_loader, test_loader, device, fast=False):
         all_labels.extend(labels.tolist())
 
         for j in range(images.shape[0]):
-            pmap = error_map[j].unsqueeze(0).unsqueeze(0)
+            pmap = error_map[j].detach().unsqueeze(0).unsqueeze(0)
             pmap = F.interpolate(pmap.float(), size=(512, 512), mode='bilinear', align_corners=False)
             pixel_maps.append(pmap.squeeze().cpu().numpy())
 
