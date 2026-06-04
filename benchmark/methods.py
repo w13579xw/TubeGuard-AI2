@@ -714,7 +714,8 @@ def build_train_loader(config, normal_only=True):
     )
     total = len(full_dataset)
     if normal_only:
-        normal_idx = [i for i, (_, lbl) in enumerate(full_dataset.samples) if lbl == 0]
+        # samples are dicts: {'image_path': ..., 'label': 0/1}
+        normal_idx = [i for i, s in enumerate(full_dataset.samples) if s['label'] == 0]
         dataset = torch.utils.data.Subset(full_dataset, normal_idx)
         print(f"  Training: {len(normal_idx)} normal-only (from {total} total)")
     else:

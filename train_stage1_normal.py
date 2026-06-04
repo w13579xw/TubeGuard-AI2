@@ -48,7 +48,7 @@ def build_normal_only_dataset(config):
     )
 
     # Filter to normal-only
-    normal_indices = [i for i, (_, label) in enumerate(full_dataset.samples) if label == 0]
+    normal_indices = [i for i, s in enumerate(full_dataset.samples) if s['label'] == 0]
     normal_dataset = torch.utils.data.Subset(full_dataset, normal_indices)
 
     return normal_dataset, len(normal_indices)
