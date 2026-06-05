@@ -253,15 +253,9 @@ class PatchCore:
         self.n_spatial_sample = n_spatial_sample
         self.backbone = backbone
 
-        # Try WideResNet50 first (stronger features), fall back to ResNet18
-        try:
-            if backbone == 'wideresnet50':
-                self.extractor = WideResNet50FeatureExtractor(device=self.device).to(self.device).eval()
-            else:
-                self.extractor = ResNet18FeatureExtractor(device=self.device).to(self.device).eval()
-        except Exception:
-            print("  Falling back to ResNet18 backbone")
-            self.backbone = 'resnet18'
+        if backbone == 'wideresnet50':
+            self.extractor = WideResNet50FeatureExtractor(device=self.device).to(self.device).eval()
+        else:
             self.extractor = ResNet18FeatureExtractor(device=self.device).to(self.device).eval()
 
     @torch.no_grad()
