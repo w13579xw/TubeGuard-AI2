@@ -520,11 +520,15 @@ class RD4AD:
                     teacher_feats = self.teacher(images)  # [f1, f2, f3]
                 student_feats = self.student(teacher_feats[-1])  # [d1, d2]
 
+                # Align teacher spatial dims to student output
+                t0 = F.adaptive_avg_pool2d(teacher_feats[0], student_feats[0].shape[2:])
+                t1 = F.adaptive_avg_pool2d(teacher_feats[1], student_feats[1].shape[2:])
+
                 # MSE loss on all feature levels
-                loss = F.mse_loss(student_feats[0], teacher_feats[0]) + \
-                       F.mse_loss(student_feats[1], teacher_feats[1])
-                # Add cosine distance loss for better alignment
-                T1 = F.normalize(teacher_feats[0].flatten(1), dim=1)
+                loss = F.mse_loss(student_feats[0], t0) + \
+                       F.mse_loss(student_feats[1], t1)
+                # Cosine distance loss
+                T1 = F.normalize(t0.flatten(1), dim=1)
                 S1 = F.normalize(student_feats[0].flatten(1), dim=1)
                 loss = loss + 0.5 * (1 - (T1 * S1).sum(dim=1)).mean()
 
@@ -556,12 +560,15 @@ class RD4AD:
             teacher_feats = self.teacher(images)
             student_feats = self.student(teacher_feats[-1])
 
-            # Cosine distance at each level
-            T = F.normalize(teacher_feats[0].flatten(2), dim=1)  # (B, C, HW)
-            S = F.normalize(student_feats[0].flatten(2), dim=1)
-            cos_dist = 1 - (T * S).sum(dim=1)  # (B, HW)
+            # Align teacher to student spatial dims
+            T_feat = F.adaptive_avg_pool2d(teacher_feats[0], student_feats[0].shape[2:])
 
-            B, C, H, W = teacher_feats[0].shape
+            # Cosine distance
+            T = F.normalize(T_feat.flatten(2), dim=1)
+            S = F.normalize(student_feats[0].flatten(2), dim=1)
+            cos_dist = 1 - (T * S).sum(dim=1)
+
+            B, _, H, W = student_feats[0].shape
             anomaly_map = cos_dist.reshape(B, H, W)
 
             img_score = anomaly_map.reshape(B, -1).max(dim=1).values
@@ -582,15 +589,16 @@ class RD4AD:
 # ============================================================
 
 class EfficientADStudent(nn.Module):
-    """Lightweight student for feature distillation."""
+    """Lightweight student for feature distillation. Outputs 512-d features."""
 
-    def __init__(self, in_channels=3):
+    def __init__(self, in_channels=3, out_channels=512):
         super().__init__()
         self.net = nn.Sequential(
             nn.Conv2d(in_channels, 32, 4, 2, 1), nn.BatchNorm2d(32), nn.LeakyReLU(0.2),
             nn.Conv2d(32, 64, 4, 2, 1), nn.BatchNorm2d(64), nn.LeakyReLU(0.2),
             nn.Conv2d(64, 128, 4, 2, 1), nn.BatchNorm2d(128), nn.LeakyReLU(0.2),
             nn.Conv2d(128, 256, 4, 2, 1), nn.BatchNorm2d(256), nn.LeakyReLU(0.2),
+            nn.Conv2d(256, out_channels, 3, 2, 1), nn.BatchNorm2d(out_channels), nn.LeakyReLU(0.2),
         )
 
     def forward(self, x):
@@ -630,11 +638,10 @@ class EfficientAD:
                 images = batch['image'].to(self.device)
                 with torch.no_grad():
                     teacher_feats = self.teacher(images)
-                    # Use layer2 output, pool to match student spatial size
-                    t_feat = F.adaptive_avg_pool2d(teacher_feats[0], (16, 16))
+                    t_feat = F.adaptive_avg_pool2d(teacher_feats[0], (16, 16))  # (B, 512, 16, 16)
 
-                s_feat = self.student(images)
-                # Feature distillation loss (cosine + MSE)
+                s_feat = self.student(images)  # (B, 512, 16, 16)
+                # Feature distillation loss
                 loss = F.mse_loss(s_feat, t_feat) + \
                        0.3 * (1 - F.cosine_similarity(
                            s_feat.flatten(1), t_feat.flatten(1), dim=1)).mean()
