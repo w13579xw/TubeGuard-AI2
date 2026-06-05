@@ -244,17 +244,24 @@ class PatchCore:
     Reference: Roth et al., CVPR 2022
     """
 
-    def __init__(self, backbone='resnet18', coreset_ratio=0.01, device='cuda',
-                 pool_size=16, max_train_samples=500, n_spatial_sample=128):
+    def __init__(self, backbone='resnet18', coreset_ratio=0.1, device='cuda',
+                 pool_size=32, max_train_samples=800, n_spatial_sample=256):
         self.device = torch.device(device)
         self.coreset_ratio = coreset_ratio
         self.pool_size = pool_size
         self.max_train_samples = max_train_samples
         self.n_spatial_sample = n_spatial_sample
+        self.backbone = backbone
 
-        if backbone == 'wideresnet50':
-            self.extractor = WideResNet50FeatureExtractor(device=self.device).to(self.device).eval()
-        else:
+        # Try WideResNet50 first (stronger features), fall back to ResNet18
+        try:
+            if backbone == 'wideresnet50':
+                self.extractor = WideResNet50FeatureExtractor(device=self.device).to(self.device).eval()
+            else:
+                self.extractor = ResNet18FeatureExtractor(device=self.device).to(self.device).eval()
+        except Exception:
+            print("  Falling back to ResNet18 backbone")
+            self.backbone = 'resnet18'
             self.extractor = ResNet18FeatureExtractor(device=self.device).to(self.device).eval()
 
     @torch.no_grad()
@@ -735,25 +742,53 @@ def build_train_loader(config, normal_only=True):
 
 
 def evaluate_method(image_scores, pixel_maps, labels, masks_list, method_name):
-    """Compute standard evaluation metrics."""
+    """Compute comprehensive evaluation metrics."""
+    from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+
     results = {}
 
-    # Image-level
+    # Image-level threshold-free
     results['I-AUROC'] = compute_auroc(image_scores, labels)
-    results['I-F1max'] = compute_f1_max(image_scores, labels)[0]
+    best_f1, best_thresh = compute_f1_max(image_scores, labels)
+    results['I-F1max'] = best_f1
     results['I-AU-PR'] = compute_auprc(image_scores, labels)
 
-    # Pixel-level (if masks available)
+    # Threshold-dependent metrics at best F1 threshold
+    preds = (image_scores >= best_thresh).astype(int)
+    results['Accuracy'] = accuracy_score(labels, preds)
+    results['Precision'] = precision_score(labels, preds, zero_division=0)
+    results['Recall'] = recall_score(labels, preds, zero_division=0)
+    results['F1-Score'] = f1_score(labels, preds, zero_division=0)
+
+    # Confusion matrix
+    cm = confusion_matrix(labels, preds)
+    tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
+    results['True_Negative'] = int(tn)
+    results['False_Positive'] = int(fp)
+    results['False_Negative'] = int(fn)
+    results['True_Positive'] = int(tp)
+    results['Specificity'] = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+    results['Best_Threshold'] = float(best_thresh)
+
+    # Pixel-level
     if masks_list and len(masks_list) > 0:
         px_scores = np.concatenate([p.flatten() for p in pixel_maps])
         px_labels = np.concatenate([m.flatten() for m in masks_list])
         results['P-AUROC'] = compute_auroc(px_scores, px_labels)
 
+    # Print formatted output
     print(f"\n{'='*60}")
     print(f"  {method_name} Results")
     print(f"{'='*60}")
-    for k, v in results.items():
-        print(f"  {k:>12s}: {v:.4f}")
+    print(f"  I-AUROC : {results['I-AUROC']:.4f}    I-F1max: {results['I-F1max']:.4f}")
+    print(f"  AU-PR   : {results['I-AU-PR']:.4f}    Thresh : {results['Best_Threshold']:.4f}")
+    print(f"  Accuracy: {results['Accuracy']:.4f}    Precision: {results['Precision']:.4f}")
+    print(f"  Recall  : {results['Recall']:.4f}    F1-Score: {results['F1-Score']:.4f}")
+    print(f"  Specificity: {results['Specificity']:.4f}")
+    print(f"  Confusion Matrix: TN={results['True_Negative']} FP={results['False_Positive']} "
+          f"FN={results['False_Negative']} TP={results['True_Positive']}")
+    if 'P-AUROC' in results:
+        print(f"  P-AUROC : {results['P-AUROC']:.4f}")
     print(f"{'='*60}\n")
 
     return results

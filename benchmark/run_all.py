@@ -96,6 +96,13 @@ def run_padim(config, train_loader, test_loader, device):
     image_scores, pixel_maps, labels = padim.predict(test_loader)
     inf_time = time.time() - t0
 
+    # Save model
+    ckpt_dir = config.get('train', {}).get('checkpoint_dir', 'checkpoints')
+    os.makedirs(ckpt_dir, exist_ok=True)
+    torch.save({'means': padim.means, 'inv_covs': padim.inv_covs},
+               os.path.join(ckpt_dir, 'padim.pth'))
+    print(f"  Model saved: {ckpt_dir}/padim.pth")
+
     masks_list = [batch['mask'].squeeze().numpy() for batch in test_loader if batch['mask'].sum() > 0]
     results = evaluate_method(image_scores, pixel_maps, labels, masks_list, 'PaDiM')
     results['fit_time'] = fit_time
@@ -109,8 +116,8 @@ def run_patchcore(config, train_loader, test_loader, device):
     print("  Running PatchCore Benchmark")
     print("=" * 60)
 
-    # Use resnet18 for stability (wideresnet50 may not be downloadable on offline servers)
-    patchcore = PatchCore(backbone='resnet18', coreset_ratio=0.01, device=device,
+    # Try wideresnet50 first for stronger features, falls back to resnet18
+    patchcore = PatchCore(backbone='wideresnet50', coreset_ratio=0.1, device=device,
                           max_train_samples=800, pool_size=32)
     t0 = time.time()
     patchcore.fit(train_loader)
@@ -119,6 +126,13 @@ def run_patchcore(config, train_loader, test_loader, device):
     t0 = time.time()
     image_scores, pixel_maps, labels = patchcore.predict(test_loader)
     inf_time = time.time() - t0
+
+    # Save model
+    ckpt_dir = config.get('train', {}).get('checkpoint_dir', 'checkpoints')
+    os.makedirs(ckpt_dir, exist_ok=True)
+    torch.save({'coreset': patchcore.coreset, 'mean': patchcore.mean, 'std': patchcore.std},
+               os.path.join(ckpt_dir, 'patchcore.pth'))
+    print(f"  Model saved: {ckpt_dir}/patchcore.pth")
 
     masks_list = [batch['mask'].squeeze().numpy() for batch in test_loader if batch['mask'].sum() > 0]
     results = evaluate_method(image_scores, pixel_maps, labels, masks_list, 'PatchCore')
@@ -162,6 +176,11 @@ def run_autoencoder(config, train_loader, test_loader, device, fast=False):
 
     inf_time = time.time() - t0
 
+    ckpt_dir = config.get('train', {}).get('checkpoint_dir', 'checkpoints')
+    os.makedirs(ckpt_dir, exist_ok=True)
+    torch.save(model.state_dict(), os.path.join(ckpt_dir, 'autoencoder.pth'))
+    print(f"  Model saved: {ckpt_dir}/autoencoder.pth")
+
     results = evaluate_method(np.array(image_scores), pixel_maps, np.array(all_labels),
                               all_masks if all_masks else [], 'Autoencoder')
     results['inference_time'] = inf_time
@@ -179,6 +198,11 @@ def run_rd4ad(config, train_loader, test_loader, device, fast=False):
     rd4ad.fit(train_loader, epochs=epochs, lr=0.005)
 
     image_scores, pixel_maps, labels = rd4ad.predict(test_loader)
+    ckpt_dir = config.get('train', {}).get('checkpoint_dir', 'checkpoints')
+    os.makedirs(ckpt_dir, exist_ok=True)
+    torch.save(rd4ad.student.state_dict(), os.path.join(ckpt_dir, 'rd4ad.pth'))
+    print(f"  Model saved: {ckpt_dir}/rd4ad.pth")
+
     masks_list = [batch['mask'].squeeze().numpy() for batch in test_loader if batch['mask'].sum() > 0]
     results = evaluate_method(image_scores, pixel_maps, labels, masks_list, 'RD4AD')
     return results
@@ -195,6 +219,11 @@ def run_efficientad(config, train_loader, test_loader, device, fast=False):
     ead.fit(train_loader, epochs=epochs, lr=1e-3)
 
     image_scores, pixel_maps, labels = ead.predict(test_loader)
+    ckpt_dir = config.get('train', {}).get('checkpoint_dir', 'checkpoints')
+    os.makedirs(ckpt_dir, exist_ok=True)
+    torch.save(ead.student.state_dict(), os.path.join(ckpt_dir, 'efficientad.pth'))
+    print(f"  Model saved: {ckpt_dir}/efficientad.pth")
+
     masks_list = [batch['mask'].squeeze().numpy() for batch in test_loader if batch['mask'].sum() > 0]
     results = evaluate_method(image_scores, pixel_maps, labels, masks_list, 'EfficientAD')
     return results
