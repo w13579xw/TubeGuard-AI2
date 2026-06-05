@@ -343,7 +343,7 @@ class PatchCore:
 
     @torch.no_grad()
     def predict(self, loader, k=5):
-        """Compute nearest-neighbor distance for anomaly scoring."""
+        """Compute k-NN distance for anomaly scoring (standard PatchCore)."""
         coreset = self.coreset.to(self.device)
         image_scores = []
         pixel_scores_list = []
@@ -366,20 +366,22 @@ class PatchCore:
             patches = combined.permute(0, 2, 3, 1).reshape(B * H * W, C)
             patches_norm = (patches - self.mean.to(self.device)) / self.std.to(self.device)
 
-            # Compute distances to coreset (in chunks to avoid OOM)
+            # k-NN distance: average distance to k nearest neighbors
             chunk_size = 4096
-            min_dists = torch.full((B * H * W,), float('inf'), device=self.device)
-
+            all_dists = []
             for i in range(0, len(coreset), chunk_size):
                 chunk = coreset[i:i + chunk_size]
-                dists = torch.cdist(patches_norm, chunk)  # (B*H*W, chunk_size)
-                chunk_min = dists.min(dim=1).values
-                min_dists = torch.min(min_dists, chunk_min)
+                dists = torch.cdist(patches_norm, chunk)
+                all_dists.append(dists)
+            all_dists = torch.cat(all_dists, dim=1)  # (B*H*W, N_coreset)
+            topk_dists, _ = torch.topk(all_dists, k=min(k, all_dists.shape[1]),
+                                        dim=1, largest=False)
+            k_avg = topk_dists.mean(dim=1)  # (B*H*W,)
 
-            anomaly_map = min_dists.reshape(B, H, W)
+            anomaly_map = k_avg.reshape(B, H, W)
 
-            # Image-level score
-            img_score = anomaly_map.reshape(B, -1).max(dim=1).values
+            # Image-level: mean distance (more robust than max)
+            img_score = anomaly_map.reshape(B, -1).mean(dim=1)
             image_scores.extend(img_score.cpu().tolist())
             all_labels.extend(labels.tolist())
 
@@ -561,22 +563,29 @@ class RD4AD:
             teacher_feats = self.teacher(images)
             student_feats = self.student(teacher_feats[-1])
 
-            # Align teacher to student spatial dims
-            T_feat = F.adaptive_avg_pool2d(teacher_feats[0], student_feats[0].shape[2:])
+            # Multi-layer cosine distance
+            anomaly_map = None
+            for i in range(len(student_feats)):
+                t = F.adaptive_avg_pool2d(teacher_feats[i], student_feats[i].shape[2:])
+                T = F.normalize(t.flatten(2), dim=1)
+                S = F.normalize(student_feats[i].flatten(2), dim=1)
+                layer_map = (1 - (T * S).sum(dim=1)).reshape(images.shape[0], *student_feats[i].shape[2:])
+                # Upsample to match first layer spatial size
+                if i > 0:
+                    layer_map = F.interpolate(layer_map.unsqueeze(1), size=student_feats[0].shape[2:],
+                                              mode='bilinear', align_corners=False).squeeze(1)
+                if anomaly_map is None:
+                    anomaly_map = layer_map
+                else:
+                    anomaly_map += layer_map
+            anomaly_map = anomaly_map / len(student_feats)
 
-            # Cosine distance
-            T = F.normalize(T_feat.flatten(2), dim=1)
-            S = F.normalize(student_feats[0].flatten(2), dim=1)
-            cos_dist = 1 - (T * S).sum(dim=1)
-
-            B, _, H, W = student_feats[0].shape
-            anomaly_map = cos_dist.reshape(B, H, W)
-
-            img_score = anomaly_map.reshape(B, -1).max(dim=1).values
+            # Image-level: mean over spatial dims
+            img_score = anomaly_map.reshape(images.shape[0], -1).mean(dim=1)
             image_scores.extend(img_score.cpu().tolist())
             all_labels.extend(labels.tolist())
 
-            for j in range(B):
+            for j in range(images.shape[0]):
                 pmap = anomaly_map[j].unsqueeze(0).unsqueeze(0).float()
                 pmap = F.interpolate(pmap, size=(512, 512), mode='bilinear', align_corners=False)
                 pixel_scores_list.append(pmap.squeeze().cpu().numpy())
