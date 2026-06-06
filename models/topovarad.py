@@ -91,15 +91,29 @@ class TopoVarAD(nn.Module):
         tar_n_layers=6,
         tar_n_heads=8,
         dropout=0.0,
+        use_slic=True,
+        use_topo_attn=True,
+        use_glpe=True,
     ):
         super().__init__()
         self.d_model = d_model
         self.superpixel_scales = superpixel_scales
+        self.use_slic = use_slic
+        self.use_glpe = use_glpe
 
-        self.tokenizer = T2MTokenizer(d_model, superpixel_scales)
+        # ---- Tokenizer ----
+        if use_slic:
+            self.input_proj = nn.Conv2d(3, d_model, kernel_size=3, padding=1)
+            self.tokenizer = T2MTokenizer(d_model, superpixel_scales)
+        else:
+            # Fixed 16x16 patch embedding (ViT-style, no SLIC)
+            self.patch_embed = nn.Conv2d(3, d_model, kernel_size=16, stride=16)
 
-        self.input_proj = nn.Conv2d(3, d_model, kernel_size=3, padding=1)
+        # ---- Position Encoding ----
+        if not use_glpe:
+            self.learned_pe = nn.Parameter(torch.randn(1, 2048, d_model) * 0.02)
 
+        # ---- TPM Block ----
         self.tpm = TPMBlock(
             d_model=d_model,
             n_layers=n_tpm_layers,
@@ -107,6 +121,7 @@ class TopoVarAD(nn.Module):
             d_state=d_state,
             expand=expand,
             dropout=dropout,
+            use_topo_attn=use_topo_attn,
         )
 
         self.pool_head = GlobalPoolingHead(d_model)
@@ -133,22 +148,32 @@ class TopoVarAD(nn.Module):
 
     def _tokenize(self, x):
         """
-        图像 → 特征图 → 超像素token化。
+        图像 → 特征图 → token化。
         x: (B, 3, H, W)
         返回: tokens (B, L, D), sp_labels (L,), M, N
         """
-        feat = self.input_proj(x)
+        if self.use_slic:
+            feat = self.input_proj(x)
+            tokens, masks, counts = self.tokenizer(feat)
+            total_tokens = tokens.shape[1]
+        else:
+            # Fixed-grid patch embedding
+            tokens = self.patch_embed(x)  # (B, D, H/16, W/16)
+            B, D, Hp, Wp = tokens.shape
+            tokens = tokens.flatten(2).transpose(1, 2)  # (B, Hp*Wp, D)
+            total_tokens = Hp * Wp
 
-        tokens, masks, counts = self.tokenizer(feat)
-
-        total_tokens = tokens.shape[1]
         M = int(np.ceil(np.sqrt(total_tokens)))
         N = int(np.ceil(total_tokens / M))
 
-        pad_len = M * N - total_tokens
+        pad_len = M * N - tokens.shape[1]
         if pad_len > 0:
             pad = torch.zeros(tokens.shape[0], pad_len, tokens.shape[2], device=tokens.device)
             tokens = torch.cat([tokens, pad], dim=1)
+
+        # Position encoding
+        if not self.use_glpe:
+            tokens = tokens + self.learned_pe[:, :tokens.shape[1], :]
 
         sp_labels = np.arange(M * N)
 
@@ -285,6 +310,9 @@ class TopoVarADConfig:
         self.tar_n_layers = kwargs.get('tar_n_layers', 6)
         self.tar_n_heads = kwargs.get('tar_n_heads', 8)
         self.dropout = kwargs.get('dropout', 0.0)
+        self.use_slic = kwargs.get('use_slic', True)
+        self.use_topo_attn = kwargs.get('use_topo_attn', True)
+        self.use_glpe = kwargs.get('use_glpe', True)
 
     def to_dict(self):
         return {k: v for k, v in self.__dict__.items()}

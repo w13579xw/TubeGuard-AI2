@@ -252,20 +252,24 @@ class TopologySparseAttentionFast(nn.Module):
 class TPMLayer(nn.Module):
     """
     单层TPM：双向SSM + 拓扑稀疏注意力 + 门控融合 + FFN
+    use_topo_attn=False: 去掉拓扑稀疏注意力，仅用双向SSM
     """
 
-    def __init__(self, d_model, n_heads=8, d_state=16, expand=2, dropout=0.0):
+    def __init__(self, d_model, n_heads=8, d_state=16, expand=2, dropout=0.0,
+                 use_topo_attn=True):
         super().__init__()
+        self.use_topo_attn = use_topo_attn
+
         self.norm1 = nn.LayerNorm(d_model)
         self.bidirectional_ssm = BidirectionalSSM(d_model, d_state, expand)
 
-        self.norm2 = nn.LayerNorm(d_model)
-        self.sparse_attn = TopologySparseAttention(d_model, n_heads, dropout)
-
-        self.gate = nn.Sequential(
-            nn.Linear(d_model * 2, d_model),
-            nn.Sigmoid()
-        )
+        if use_topo_attn:
+            self.norm2 = nn.LayerNorm(d_model)
+            self.sparse_attn = TopologySparseAttention(d_model, n_heads, dropout)
+            self.gate = nn.Sequential(
+                nn.Linear(d_model * 2, d_model),
+                nn.Sigmoid()
+            )
 
         self.norm3 = nn.LayerNorm(d_model)
         self.ffn = nn.Sequential(
@@ -277,29 +281,17 @@ class TPMLayer(nn.Module):
         )
 
     def forward(self, x, sp_labels, M, N):
-        """
-        x: (B, L, D)
-        sp_labels: (L,) 超像素标签
-        M, N: token网格的行列数
-        返回: (B, L, D)
-        """
         residual = x
-        x_norm = self.norm1(x)
-        ssm_out = self.bidirectional_ssm(x_norm, M, N)
+        ssm_out = self.bidirectional_ssm(self.norm1(x), M, N)
         x = residual + ssm_out
 
-        residual = x
-        x_norm = self.norm2(x)
-        attn_out = self.sparse_attn(x_norm, sp_labels)
-        x = residual + attn_out
+        if self.use_topo_attn:
+            attn_out = self.sparse_attn(self.norm2(x), sp_labels)
+            x = x + attn_out
+            alpha = self.gate(torch.cat([ssm_out, attn_out], dim=-1))
+            x = alpha * ssm_out + (1 - alpha) * attn_out
 
-        alpha = self.gate(torch.cat([ssm_out, attn_out], dim=-1))
-        x_fused = alpha * ssm_out + (1 - alpha) * attn_out
-
-        residual = x_fused
-        x_norm = self.norm3(x_fused)
-        x = residual + self.ffn(x_norm)
-
+        x = x + self.ffn(self.norm3(x))
         return x
 
 
@@ -308,10 +300,12 @@ class TPMBlock(nn.Module):
     拓扑保持Mamba块：L层TPMLayer堆叠。
     """
 
-    def __init__(self, d_model=256, n_layers=6, n_heads=8, d_state=16, expand=2, dropout=0.0):
+    def __init__(self, d_model=256, n_layers=6, n_heads=8, d_state=16, expand=2,
+                 dropout=0.0, use_topo_attn=True):
         super().__init__()
+        self.use_topo_attn = use_topo_attn
         self.layers = nn.ModuleList([
-            TPMLayer(d_model, n_heads, d_state, expand, dropout)
+            TPMLayer(d_model, n_heads, d_state, expand, dropout, use_topo_attn)
             for _ in range(n_layers)
         ])
         self.norm = nn.LayerNorm(d_model)
