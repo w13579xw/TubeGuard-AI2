@@ -22,7 +22,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.amp import GradScaler, autocast
+from torch.cuda.amp import GradScaler, autocast
 
 from data.dataset import CSVDataset
 from utils.metrics import compute_auroc, compute_f1_max, compute_auprc
@@ -196,7 +196,7 @@ def train_variant(model, train_loader, val_loader, device, max_epochs=200, lr=1e
     model.train()
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.05)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs)
-    scaler = GradScaler('cuda')
+    scaler = GradScaler()
 
     best_auroc = 0.0
     best_state = None
@@ -210,7 +210,7 @@ def train_variant(model, train_loader, val_loader, device, max_epochs=200, lr=1e
         total_loss = 0.0
         for batch in train_loader:
             images = batch['image'].to(device)
-            with autocast('cuda'):
+            with autocast():
                 x_recon, x_resized = model(images)
                 loss = F.l1_loss(x_recon, x_resized)
             scaler.scale(loss).backward()
