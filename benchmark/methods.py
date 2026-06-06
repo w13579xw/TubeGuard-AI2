@@ -773,11 +773,12 @@ def evaluate_method(image_scores, pixel_maps, labels, masks_list, method_name):
     results['Specificity'] = tn / (tn + fp) if (tn + fp) > 0 else 0.0
     results['Best_Threshold'] = float(best_thresh)
 
-    # Pixel-level
+    # Pixel-level (only if GT masks available — CSV dataset masks are all zeros)
     if masks_list and len(masks_list) > 0:
-        px_scores = np.concatenate([p.flatten() for p in pixel_maps])
         px_labels = np.concatenate([m.flatten() for m in masks_list])
-        results['P-AUROC'] = compute_auroc(px_scores, px_labels)
+        if px_labels.sum() > 0:  # Has actual defect annotations
+            px_scores = np.concatenate([p.flatten() for p in pixel_maps])
+            results['P-AUROC'] = compute_auroc(px_scores, px_labels)
 
     # Print formatted output
     print(f"\n{'='*60}")
