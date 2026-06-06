@@ -45,7 +45,7 @@ def build_normal_train_loader(config):
     )
     normal_idx = [i for i, s in enumerate(dataset.samples) if s['label'] == 0]
     dataset = torch.utils.data.Subset(dataset, normal_idx)
-    return DataLoader(dataset, batch_size=train_cfg.get('batch_size', 16),
+    return DataLoader(dataset, batch_size=4,  # smaller batch for 25M model on 512×512
                       shuffle=True, num_workers=data_cfg.get('num_workers', 4),
                       pin_memory=True, drop_last=True)
 
