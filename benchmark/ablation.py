@@ -24,6 +24,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.cuda.amp import GradScaler, autocast
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.dataset import CSVDataset
 from utils.metrics import compute_auroc, compute_f1_max, compute_auprc
 from utils.logger import TrainingLogger
