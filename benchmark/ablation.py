@@ -187,16 +187,28 @@ class AblationModel(nn.Module):
         return x_recon, x_resized
 
 
-def train_variant(model, loader, device, epochs=50, lr=1e-4):
+def train_variant(model, train_loader, val_loader, device, max_epochs=200, lr=1e-4,
+                  patience=20, eval_every=5):
+    """
+    Train with early stopping based on validation AUROC.
+    Stops when AUROC doesn't improve for `patience` consecutive evaluations.
+    """
     model.train()
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.05)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs)
     scaler = GradScaler('cuda')
 
-    pbar = tqdm(range(epochs), desc=f'Training {model.variant}')
+    best_auroc = 0.0
+    best_state = None
+    best_epoch = 0
+    no_improve = 0
+
+    pbar = tqdm(range(max_epochs), desc=f'Training {model.variant}')
     for epoch in pbar:
+        # Train
+        model.train()
         total_loss = 0.0
-        for batch in loader:
+        for batch in train_loader:
             images = batch['image'].to(device)
             with autocast('cuda'):
                 x_recon, x_resized = model(images)
@@ -207,15 +219,47 @@ def train_variant(model, loader, device, epochs=50, lr=1e-4):
             optimizer.zero_grad()
             total_loss += loss.item()
         scheduler.step()
-        pbar.set_postfix({'loss': f'{total_loss/len(loader):.4f}'})
-    return model
+
+        # Evaluate every N epochs
+        val_auroc = 0.0
+        if (epoch + 1) % eval_every == 0:
+            val_metrics = evaluate_variant(model, val_loader, device, silent=True)
+            val_auroc = val_metrics['I-AUROC']
+
+            if val_auroc > best_auroc:
+                best_auroc = val_auroc
+                best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+                best_epoch = epoch + 1
+                no_improve = 0
+            else:
+                no_improve += eval_every
+
+            pbar.set_postfix({
+                'loss': f'{total_loss/len(train_loader):.4f}',
+                'AUROC': f'{val_auroc:.4f}',
+                'best': f'{best_auroc:.4f}',
+                'wait': f'{no_improve}/{patience}',
+            })
+        else:
+            pbar.set_postfix({'loss': f'{total_loss/len(train_loader):.4f}'})
+
+        if no_improve >= patience:
+            print(f"\n  Early stop at epoch {epoch+1}, best AUROC={best_auroc:.4f} (epoch {best_epoch})")
+            break
+
+    # Restore best model
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    return model, best_auroc, best_epoch
 
 
 @torch.no_grad()
-def evaluate_variant(model, loader, device):
+def evaluate_variant(model, loader, device, silent=False):
     model.eval()
     scores, labels = [], []
-    for batch in tqdm(loader, desc='Evaluating'):
+    desc = 'Evaluating' if not silent else None
+    iterator = tqdm(loader, desc=desc, leave=False) if desc else loader
+    for batch in iterator:
         images = batch['image'].to(device)
         x_recon, x_resized = model(images)
         error = torch.abs(x_recon - x_resized).reshape(images.shape[0], -1).mean(dim=1)
@@ -244,16 +288,20 @@ def main():
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
 
     train_loader = build_normal_loader(config)
-    test_loader = build_test_loader(config)
+    val_loader = build_test_loader(config)  # use test set as validation for early stopping
 
     all_results = {}
     for variant in args.variants:
         print(f"\n{'='*50}\n  Ablation: {variant}\n{'='*50}")
         model = AblationModel(variant=variant).to(device)
-        model = train_variant(model, train_loader, device, epochs=args.epochs)
-        results = evaluate_variant(model, test_loader, device)
+        model, best_auroc, best_epoch = train_variant(
+            model, train_loader, val_loader, device,
+            max_epochs=args.epochs, patience=20, eval_every=5)
+        results = evaluate_variant(model, val_loader, device)
+        results['best_epoch'] = best_epoch
         all_results[variant] = results
-        print(f"  {variant}: AUROC={results['I-AUROC']:.4f}  F1max={results['I-F1max']:.4f}")
+        print(f"  {variant}: AUROC={results['I-AUROC']:.4f}  F1max={results['I-F1max']:.4f}  "
+              f"(best at epoch {best_epoch})")
 
     import json
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
