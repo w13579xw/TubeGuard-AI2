@@ -136,7 +136,11 @@ class AblationModel(nn.Module):
             self.token_proj = nn.Identity()
         else:
             self.use_slic = True
-            self.input_proj = nn.Conv2d(3, d_model, 3, 1, 1)
+            # Downsample by 4× to 128×128 before SLIC (matching real TopoVarAD)
+            self.input_proj = nn.Sequential(
+                nn.Conv2d(3, 64, 4, 2, 1), nn.ReLU(),
+                nn.Conv2d(64, d_model, 4, 2, 1), nn.ReLU(),
+            )
             from models.t2m_tokenizer import T2MTokenizer
             self.tokenizer = T2MTokenizer(d_model, (50, 100, 200))
 
@@ -281,7 +285,7 @@ def main():
     parser.add_argument('--variants', nargs='+',
                         default=['full', 'no_slic', 'no_tpm', 'no_glpe'],
                         help='Ablation variants to test')
-    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--output', type=str, default='logs/ablation_results.json')
     args = parser.parse_args()
 
