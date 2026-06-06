@@ -103,7 +103,7 @@ def run_padim(config, train_loader, test_loader, device):
                os.path.join(ckpt_dir, 'padim.pth'))
     print(f"  Model saved: {ckpt_dir}/padim.pth")
 
-    masks_list = [batch['mask'].squeeze().numpy() for batch in test_loader if batch['mask'].sum() > 0]
+    masks_list = [batch['mask'].squeeze().cpu().numpy() for batch in test_loader]  # all masks for P-AUROC
     results = evaluate_method(image_scores, pixel_maps, labels, masks_list, 'PaDiM')
     results['fit_time'] = fit_time
     results['inference_time'] = inf_time
@@ -134,7 +134,7 @@ def run_patchcore(config, train_loader, test_loader, device):
                os.path.join(ckpt_dir, 'patchcore.pth'))
     print(f"  Model saved: {ckpt_dir}/patchcore.pth")
 
-    masks_list = [batch['mask'].squeeze().numpy() for batch in test_loader if batch['mask'].sum() > 0]
+    masks_list = [batch['mask'].squeeze().cpu().numpy() for batch in test_loader]
     results = evaluate_method(image_scores, pixel_maps, labels, masks_list, 'PatchCore')
     results['fit_time'] = fit_time
     results['inference_time'] = inf_time
@@ -171,8 +171,7 @@ def run_autoencoder(config, train_loader, test_loader, device, fast=False):
             pmap = F.interpolate(pmap.float(), size=(512, 512), mode='bilinear', align_corners=False)
             pixel_maps.append(pmap.squeeze().cpu().numpy())
 
-        if batch['mask'].sum() > 0:
-            all_masks.append(batch['mask'].squeeze().cpu().numpy())
+        all_masks.append(batch['mask'].squeeze().cpu().numpy())
 
     inf_time = time.time() - t0
 
@@ -182,7 +181,7 @@ def run_autoencoder(config, train_loader, test_loader, device, fast=False):
     print(f"  Model saved: {ckpt_dir}/autoencoder.pth")
 
     results = evaluate_method(np.array(image_scores), pixel_maps, np.array(all_labels),
-                              all_masks if all_masks else [], 'Autoencoder')
+                              all_masks, 'Autoencoder')
     results['inference_time'] = inf_time
     return results
 
@@ -203,7 +202,7 @@ def run_rd4ad(config, train_loader, test_loader, device, fast=False):
     torch.save(rd4ad.student.state_dict(), os.path.join(ckpt_dir, 'rd4ad.pth'))
     print(f"  Model saved: {ckpt_dir}/rd4ad.pth")
 
-    masks_list = [batch['mask'].squeeze().numpy() for batch in test_loader if batch['mask'].sum() > 0]
+    masks_list = [batch['mask'].squeeze().cpu().numpy() for batch in test_loader]
     results = evaluate_method(image_scores, pixel_maps, labels, masks_list, 'RD4AD')
     return results
 
@@ -224,7 +223,7 @@ def run_efficientad(config, train_loader, test_loader, device, fast=False):
     torch.save(ead.student.state_dict(), os.path.join(ckpt_dir, 'efficientad.pth'))
     print(f"  Model saved: {ckpt_dir}/efficientad.pth")
 
-    masks_list = [batch['mask'].squeeze().numpy() for batch in test_loader if batch['mask'].sum() > 0]
+    masks_list = [batch['mask'].squeeze().cpu().numpy() for batch in test_loader]
     results = evaluate_method(image_scores, pixel_maps, labels, masks_list, 'EfficientAD')
     return results
 
@@ -304,8 +303,7 @@ def run_topovarad_stage1(config, test_loader, device):
                             mode='bilinear', align_corners=False).squeeze()
         pixel_maps.append(pmap.cpu().numpy())
 
-        if batch['mask'].sum() > 0:
-            all_masks.append(batch['mask'].squeeze().cpu().numpy())
+        all_masks.append(batch['mask'].squeeze().cpu().numpy())
 
     inf_time = time.time() - t0
 
