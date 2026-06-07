@@ -121,11 +121,11 @@ def train_one_variant(variant_name, use_slic, use_topo_attn, use_glpe,
     best_epoch = 0
     no_improve = 0
 
-    pbar = tqdm(range(epochs), desc=f'  {variant_name}')
-    for epoch in pbar:
+    for epoch in range(epochs):
         model.train()
         train_loss = 0.0
-        for batch in train_loader:
+        pbar = tqdm(train_loader, desc=f'  [{variant_name}] Epoch {epoch+1}/{epochs}', leave=False)
+        for batch in pbar:
             images = batch['image'].to(device)
             optimizer.zero_grad()
             with autocast():
@@ -137,6 +137,9 @@ def train_one_variant(variant_name, use_slic, use_topo_attn, use_glpe,
             scaler.step(optimizer)
             scaler.update()
             train_loss += loss.item()
+            pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+
+        avg_loss = train_loss / len(train_loader)
 
         val_auroc = 0.0
         if (epoch + 1) % eval_every == 0:
@@ -149,15 +152,12 @@ def train_one_variant(variant_name, use_slic, use_topo_attn, use_glpe,
                 no_improve = 0
             else:
                 no_improve += eval_every
-
-        pbar.set_postfix({
-            'loss': f'{train_loss/len(train_loader):.4f}',
-            'AUROC': f'{val_auroc:.4f}', 'best': f'{best_auroc:.4f}',
-            'wait': f'{no_improve}/{patience}'
-        })
+            print(f"  [{variant_name}] Epoch {epoch+1:>3d} | loss={avg_loss:.4f} | AUROC={val_auroc:.4f} | best={best_auroc:.4f} | wait={no_improve}/{patience}")
+        else:
+            print(f"  [{variant_name}] Epoch {epoch+1:>3d} | loss={avg_loss:.4f}")
 
         if no_improve >= patience:
-            print(f"  Early stop at epoch {epoch+1}, best={best_auroc:.4f} @ epoch {best_epoch}")
+            print(f"  [{variant_name}] Early stop at epoch {epoch+1}, best={best_auroc:.4f} @ epoch {best_epoch}")
             break
 
     if best_state is not None:
@@ -209,11 +209,6 @@ def main():
         results = train_one_variant(name, slic, topo, glpe, config, train_loader, val_loader, device)
         all_results[name] = results
         print(f"  >>> {name}: AUROC={results['I-AUROC']:.4f} F1max={results['I-F1max']:.4f} (epoch {results['best_epoch']})")
-
-        # Save individual result
-        out_path = os.path.join(args.output_dir, f'{name}.json')
-        with open(out_path, 'w') as f:
-            json.dump(results, f, indent=2, default=float)
 
     # Merge all results into summary
     merge_path = os.path.join(args.output_dir, 'summary.json')
