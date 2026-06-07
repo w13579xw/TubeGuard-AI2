@@ -172,7 +172,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/default.yaml')
     parser.add_argument('--device', type=str, default='cuda')
-    parser.add_argument('--output', type=str, default='logs/ablation_results.json')
+    parser.add_argument('--variant', type=str, default='full',
+                        choices=['full', 'no_slic', 'no_topo', 'no_glpe', 'all'],
+                        help='Which variant to run (or "all")')
+    parser.add_argument('--output_dir', type=str, default='logs/ablation')
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -183,12 +186,23 @@ def main():
     print(f"Train: {len(train_loader.dataset)} normal samples")
     print(f"Val: {len(val_loader.dataset)} samples")
 
-    variants = [
-        ('full',     True,  True,  True),
-        ('no_slic',  False, True,  True),
-        ('no_topo',  True,  False, True),
-        ('no_glpe',  True,  True,  False),
-    ]
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    if args.variant == 'all':
+        variants = [
+            ('full',     True,  True,  True),
+            ('no_slic',  False, True,  True),
+            ('no_topo',  True,  False, True),
+            ('no_glpe',  True,  True,  False),
+        ]
+    else:
+        mapping = {
+            'full':    (True, True, True),
+            'no_slic': (False, True, True),
+            'no_topo': (True, False, True),
+            'no_glpe': (True, True, False),
+        }
+        variants = [(args.variant,) + mapping[args.variant]]
 
     all_results = {}
     for name, slic, topo, glpe in variants:
@@ -196,18 +210,24 @@ def main():
         all_results[name] = results
         print(f"  >>> {name}: AUROC={results['I-AUROC']:.4f} F1max={results['I-F1max']:.4f} (epoch {results['best_epoch']})")
 
-    os.makedirs(os.path.dirname(args.output), exist_ok=True)
-    with open(args.output, 'w') as f:
+        # Save individual result
+        out_path = os.path.join(args.output_dir, f'{name}.json')
+        with open(out_path, 'w') as f:
+            json.dump(results, f, indent=2, default=float)
+
+    # Merge all results into summary
+    merge_path = os.path.join(args.output_dir, 'summary.json')
+    with open(merge_path, 'w') as f:
         json.dump(all_results, f, indent=2, default=float)
 
-    # Summary
-    baseline = all_results['full']['I-AUROC']
-    print(f"\n{'='*60}\n  ABLATION SUMMARY\n{'='*60}")
-    print(f"{'Variant':<15} {'AUROC':>10} {'F1max':>10} {'ΔAUROC':>10} {'Epoch':>8}")
-    for name in ['full', 'no_slic', 'no_topo', 'no_glpe']:
-        r = all_results[name]
-        delta = r['I-AUROC'] - baseline
-        print(f"{name:<15} {r['I-AUROC']:>10.4f} {r['I-F1max']:>10.4f} {delta:>+10.4f} {r['best_epoch']:>8}")
+    if len(all_results) > 1:
+        baseline = all_results['full']['I-AUROC']
+        print(f"\n{'='*60}\n  ABLATION SUMMARY\n{'='*60}")
+        print(f"{'Variant':<15} {'AUROC':>10} {'F1max':>10} {'ΔAUROC':>10} {'Epoch':>8}")
+        for name in ['full', 'no_slic', 'no_topo', 'no_glpe']:
+            r = all_results[name]
+            delta = r['I-AUROC'] - baseline
+            print(f"{name:<15} {r['I-AUROC']:>10.4f} {r['I-F1max']:>10.4f} {delta:>+10.4f} {r['best_epoch']:>8}")
 
 
 if __name__ == '__main__':
