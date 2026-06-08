@@ -165,6 +165,8 @@ def train_one_variant(variant_name, use_slic, use_topo_attn, use_glpe,
 
     final = evaluate_reconstruction(model, val_loader, device)
     final['best_epoch'] = best_epoch
+    if best_state is not None:
+        final['best_state'] = best_state
     return final
 
 
@@ -204,18 +206,29 @@ def main():
         }
         variants = [(args.variant,) + mapping[args.variant]]
 
+    ckpt_dir = config.get('train', {}).get('checkpoint_dir', 'checkpoints')
+
     all_results = {}
     for name, slic, topo, glpe in variants:
         results = train_one_variant(name, slic, topo, glpe, config, train_loader, val_loader, device)
         all_results[name] = results
         print(f"  >>> {name}: AUROC={results['I-AUROC']:.4f} F1max={results['I-F1max']:.4f} (epoch {results['best_epoch']})")
 
-    # Merge all results into summary
-    merge_path = os.path.join(args.output_dir, 'summary.json')
-    with open(merge_path, 'w') as f:
-        json.dump(all_results, f, indent=2, default=float)
+        # Save best model (remove state_dict from JSON to keep it small)
+        if 'best_state' in results:
+            model_path = os.path.join(ckpt_dir, f'ablation_{name}.pth')
+            torch.save(results.pop('best_state'), model_path)
+            print(f"  Model saved: {model_path}")
 
+        # Save individual result JSON
+        out_path = os.path.join(args.output_dir, f'{name}.json')
+        with open(out_path, 'w') as f:
+            json.dump(results, f, indent=2, default=float)
+
+    # Only write summary.json when running all variants
     if len(all_results) > 1:
+        with open(os.path.join(args.output_dir, 'summary.json'), 'w') as f:
+            json.dump(all_results, f, indent=2, default=float)
         baseline = all_results['full']['I-AUROC']
         print(f"\n{'='*60}\n  ABLATION SUMMARY\n{'='*60}")
         print(f"{'Variant':<15} {'AUROC':>10} {'F1max':>10} {'ΔAUROC':>10} {'Epoch':>8}")
