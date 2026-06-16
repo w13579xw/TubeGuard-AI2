@@ -19,7 +19,7 @@ Usage:
   nohup python train_mvtec.py --root /path/to/mvtec --category bottle --device cuda > logs/mvtec/bottle.log 2>&1 &
 """
 
-import os, sys, argparse, yaml, json, time
+import os, sys, argparse, yaml, json, time, logging
 import numpy as np
 from tqdm import tqdm
 
@@ -128,10 +128,22 @@ def train_one_category(category, root, config, device, output_dir,
     image_size = 256  # MVTec standard
     batch_size = 8
 
+    # Setup per-category logger
+    os.makedirs(output_dir, exist_ok=True)
+    log_path = os.path.join(output_dir, f'{category}.log')
+    logger = logging.getLogger(category)
+    logger.handlers.clear()
+    logger.setLevel(logging.INFO)
+    fh = logging.FileHandler(log_path)
+    fh.setFormatter(logging.Formatter('%(asctime)s | %(message)s', datefmt='%H:%M:%S'))
+    logger.addHandler(fh)
+    logger.addHandler(logging.StreamHandler())
+
+    logger.info(f"{'='*60}\n  MVTec Category: {category}\n{'='*60}")
     print(f"\n{'='*60}\n  MVTec Category: {category}\n{'='*60}")
 
     train_loader, test_loader = build_loaders(root, category, image_size, batch_size)
-    print(f"  Train: {len(train_loader.dataset)} normal | Test: {len(test_loader.dataset)}")
+    logger.info(f"  Train: {len(train_loader.dataset)} normal | Test: {len(test_loader.dataset)}")
 
     # Build model
     topo_cfg = TopoVarADConfig(
@@ -148,7 +160,7 @@ def train_one_category(category, root, config, device, output_dir,
     )
     model = topo_cfg.build_model().to(device)
     model.set_stage(1)
-    print(f"  Params: {sum(p.numel() for p in model.parameters()):,}")
+    logger.info(f"  Params: {sum(p.numel() for p in model.parameters()):,}")
 
     criterion = TopoVarADLoss(
         lambda_lpips=train_cfg.get('lambda_lpips', 0.1),
@@ -196,14 +208,14 @@ def train_one_category(category, root, config, device, output_dir,
                 no_improve = 0
             else:
                 no_improve += eval_every
-            print(f"  [{category}] Epoch {epoch+1:>3d} | loss={avg_loss:.4f} | "
-                  f"I-AUROC={val_auroc:.4f} | P-AUROC={metrics.get('P-AUROC', 0):.4f} | "
-                  f"best={best_auroc:.4f} | wait={no_improve}/{patience}")
+            logger.info(f"  Epoch {epoch+1:>3d} | loss={avg_loss:.4f} | "
+                        f"I-AUROC={val_auroc:.4f} | P-AUROC={metrics.get('P-AUROC', 0):.4f} | "
+                        f"best={best_auroc:.4f} | wait={no_improve}/{patience}")
         else:
-            print(f"  [{category}] Epoch {epoch+1:>3d} | loss={avg_loss:.4f}")
+            logger.info(f"  Epoch {epoch+1:>3d} | loss={avg_loss:.4f}")
 
         if no_improve >= patience:
-            print(f"  [{category}] Early stop at epoch {epoch+1}, best={best_auroc:.4f} @ epoch {best_epoch}")
+            logger.info(f"  Early stop at epoch {epoch+1}, best={best_auroc:.4f} @ epoch {best_epoch}")
             break
 
     # Restore best, do final full eval
