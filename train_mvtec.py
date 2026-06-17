@@ -31,11 +31,13 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.cuda.amp import GradScaler, autocast
+from torchvision import transforms
 
 from data.dataset import MVTecDataset
 from models.topovarad import TopoVarAD, TopoVarADConfig
 from utils.losses import TopoVarADLoss
 from utils.metrics import compute_auroc, compute_f1_max, compute_auprc, compute_pro
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
 
 
 # All 15 MVTec AD categories
@@ -53,8 +55,21 @@ def load_config(path):
 
 def build_loaders(root, category, image_size=256, batch_size=8, num_workers=4):
     """Build MVTec train (normal-only) and test loaders for one category."""
-    train_dataset = MVTecDataset(root=root, category=category, split='train', image_size=image_size)
-    test_dataset = MVTecDataset(root=root, category=category, split='test', image_size=image_size)
+    # Anti-overfitting augmentation for normal-only training.
+    train_tf = transforms.Compose([
+        transforms.Resize((image_size, image_size)),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.RandomVerticalFlip(p=0.5),
+        transforms.RandomRotation(10),
+        transforms.ColorJitter(brightness=0.1, contrast=0.1),
+        transforms.ToTensor(),
+    ])
+    test_tf = transforms.Compose([
+        transforms.Resize((image_size, image_size)),
+        transforms.ToTensor(),
+    ])
+    train_dataset = MVTecDataset(root=root, category=category, split='train', image_size=image_size, transform=train_tf)
+    test_dataset = MVTecDataset(root=root, category=category, split='test', image_size=image_size, transform=test_tf)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
                               num_workers=num_workers, pin_memory=True, drop_last=True)
@@ -94,10 +109,25 @@ def evaluate_mvtec(model, test_loader, device):
     img_scores = np.array(img_scores)
     img_labels = np.array(img_labels)
 
+    f1max, best_thresh = compute_f1_max(img_scores, img_labels)
+    preds = (img_scores >= best_thresh).astype(int)
+    cm = confusion_matrix(img_labels, preds)
+    tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
+
     results = {
         'I-AUROC': compute_auroc(img_scores, img_labels),
-        'I-F1max': compute_f1_max(img_scores, img_labels)[0],
+        'I-F1max': f1max,
         'I-AU-PR': compute_auprc(img_scores, img_labels),
+        'Accuracy': accuracy_score(img_labels, preds),
+        'Precision': precision_score(img_labels, preds, zero_division=0),
+        'Recall': recall_score(img_labels, preds, zero_division=0),
+        'F1-Score': f1_score(img_labels, preds, zero_division=0),
+        'Specificity': tn / (tn + fp) if (tn + fp) > 0 else 0.0,
+        'Best_Threshold': float(best_thresh),
+        'True_Negative': int(tn),
+        'False_Positive': int(fp),
+        'False_Negative': int(fn),
+        'True_Positive': int(tp),
     }
 
     # Pixel-level (only if there are any defect masks)
@@ -170,6 +200,7 @@ def train_one_category(category, root, config, device, output_dir,
 
     optimizer = optim.AdamW(model.parameters(), lr=train_cfg.get('lr_stage1', 1e-4),
                              weight_decay=0.05)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs)
     scaler = GradScaler()
 
     best_auroc = 0.0
@@ -197,6 +228,8 @@ def train_one_category(category, root, config, device, output_dir,
             pbar.set_postfix({'loss': f'{loss.item():.4f}'})
 
         avg_loss = train_loss / len(train_loader)
+        scheduler.step()
+        lr_current = optimizer.param_groups[0]['lr']
 
         if (epoch + 1) % eval_every == 0:
             metrics = evaluate_mvtec(model, test_loader, device)
@@ -208,11 +241,18 @@ def train_one_category(category, root, config, device, output_dir,
                 no_improve = 0
             else:
                 no_improve += eval_every
-            logger.info(f"  Epoch {epoch+1:>3d} | loss={avg_loss:.4f} | "
-                        f"I-AUROC={val_auroc:.4f} | P-AUROC={metrics.get('P-AUROC', 0):.4f} | "
-                        f"best={best_auroc:.4f} | wait={no_improve}/{patience}")
+            logger.info(
+                f"  Epoch {epoch+1:>3d} | loss={avg_loss:.4f} | lr={lr_current:.2e} | "
+                f"I-AUROC={val_auroc:.4f} | I-F1={metrics['I-F1max']:.4f} | "
+                f"Acc={metrics['Accuracy']:.4f} | Pre={metrics['Precision']:.4f} | "
+                f"Rec={metrics['Recall']:.4f} | Spec={metrics['Specificity']:.4f} | "
+                f"P-AUROC={metrics.get('P-AUROC', 0):.4f} | PRO={metrics.get('PRO', 0):.4f} | "
+                f"CM(TN/FP/FN/TP)={metrics['True_Negative']}/{metrics['False_Positive']}/"
+                f"{metrics['False_Negative']}/{metrics['True_Positive']} | "
+                f"best={best_auroc:.4f} | wait={no_improve}/{patience}"
+            )
         else:
-            logger.info(f"  Epoch {epoch+1:>3d} | loss={avg_loss:.4f}")
+            logger.info(f"  Epoch {epoch+1:>3d} | loss={avg_loss:.4f} | lr={lr_current:.2e}")
 
         if no_improve >= patience:
             logger.info(f"  Early stop at epoch {epoch+1}, best={best_auroc:.4f} @ epoch {best_epoch}")
@@ -228,6 +268,14 @@ def train_one_category(category, root, config, device, output_dir,
     final = evaluate_mvtec(model, test_loader, device)
     final['best_epoch'] = best_epoch
     final['train_time_h'] = (time.time() - t_start) / 3600
+    logger.info(
+        f"  FINAL | I-AUROC={final['I-AUROC']:.4f} | I-F1={final['I-F1max']:.4f} | "
+        f"AU-PR={final['I-AU-PR']:.4f} | Acc={final['Accuracy']:.4f} | "
+        f"Pre={final['Precision']:.4f} | Rec={final['Recall']:.4f} | Spec={final['Specificity']:.4f} | "
+        f"P-AUROC={final.get('P-AUROC', 0):.4f} | PRO={final.get('PRO', 0):.4f} | "
+        f"CM(TN/FP/FN/TP)={final['True_Negative']}/{final['False_Positive']}/"
+        f"{final['False_Negative']}/{final['True_Positive']} | best_epoch={best_epoch}"
+    )
 
     # Save per-category JSON
     result_path = os.path.join(output_dir, f'{category}.json')
