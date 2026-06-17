@@ -239,7 +239,7 @@ def train_one_category(category, root, config, device, output_dir,
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--root', type=str, required=True, help='MVTec AD root dir')
+    parser.add_argument('--root', type=str, default='../mvtec_ad', help='MVTec AD root dir')
     parser.add_argument('--config', type=str, default='configs/default.yaml')
     parser.add_argument('--category', type=str, default='all',
                         help='Category name or "all"')
