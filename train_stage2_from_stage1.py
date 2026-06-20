@@ -26,7 +26,8 @@ def load_config(path):
 
 
 def build_optimizer(model, lr, weight_decay):
-    return optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    return optim.AdamW(trainable_params, lr=lr, weight_decay=weight_decay)
 
 
 def build_scheduler(optimizer, total_epochs, warmup_epochs):
@@ -58,6 +59,40 @@ def load_stage1_checkpoint(model, path):
     return ckpt['epoch']
 
 
+STAGE1_MODULE_NAMES = [
+    'input_proj', 'tokenizer', 'patch_embed', 'learned_pe',
+    'tpm', 'pool_head', 'pixel_head'
+]
+
+
+def _set_stage1_requires_grad(model, requires_grad):
+    n_params = 0
+    for name in STAGE1_MODULE_NAMES:
+        obj = getattr(model, name, None)
+        if obj is None:
+            continue
+        if isinstance(obj, nn.Parameter):
+            obj.requires_grad_(requires_grad)
+            n_params += obj.numel()
+        else:
+            for p in obj.parameters():
+                p.requires_grad_(requires_grad)
+                n_params += p.numel()
+    return n_params
+
+
+def freeze_stage1_modules(model):
+    return _set_stage1_requires_grad(model, False)
+
+
+def unfreeze_stage1_modules(model):
+    return _set_stage1_requires_grad(model, True)
+
+
+def count_trainable_params(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
 def train_one_epoch_stage2(model, loader, optimizer, criterion, scaler, device, epoch):
     model.train()
     total_loss = 0.0
@@ -80,7 +115,8 @@ def train_one_epoch_stage2(model, loader, optimizer, criterion, scaler, device, 
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
-        nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+        nn.utils.clip_grad_norm_(trainable_params, max_norm=0.5)
         scaler.step(optimizer)
         scaler.update()
 
@@ -221,6 +257,8 @@ def main():
     parser.add_argument('--stage1_checkpoint', type=str, required=True,
                         help='Path to Stage1 checkpoint (e.g., checkpoints/stage1_best.pth)')
     parser.add_argument('--device', type=str, default='cuda')
+    parser.add_argument('--freeze_stage1_epochs', type=int, default=None,
+                        help='Freeze Stage1 modules for N Stage2 epochs; 0=always frozen, -1=never freeze')
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -284,6 +322,17 @@ def main():
     model.set_stage(2)
     print("Switched to Stage 2 mode")
 
+    freeze_stage1_epochs = args.freeze_stage1_epochs
+    if freeze_stage1_epochs is None:
+        freeze_stage1_epochs = train_config.get('freeze_stage1_epochs', 10)
+    frozen_params = 0
+    if freeze_stage1_epochs >= 0:
+        frozen_params = freeze_stage1_modules(model)
+        print(f"Frozen Stage1 modules: {frozen_params:,} params")
+        print(f"Trainable params after freeze: {count_trainable_params(model):,}")
+    else:
+        print("Stage1 freezing disabled")
+
     criterion = TopoVarADLoss(
         lambda_lpips=train_config.get('lambda_lpips', 0.1),
         lambda_rqvae=train_config.get('lambda_rqvae', 0.5),
@@ -312,6 +361,9 @@ def main():
     logger.log_message(f"  Epochs: {epochs}, LR: {lr}, Batch Size: {train_config.get('batch_size', 4)}")
     logger.log_message(f"  Early Stopping: {patience} epochs, Device: {device}")
     logger.log_message(f"  Model parameters: {total_params:,}")
+    logger.log_message(f"  Freeze Stage1 epochs: {freeze_stage1_epochs}")
+    logger.log_message(f"  Frozen Stage1 params: {frozen_params:,}")
+    logger.log_message(f"  Trainable params: {count_trainable_params(model):,}")
     logger.log_message(f"  Gradient clipping: 0.5 (stricter than Stage1)")
 
     print(f"\n{'='*60}")
@@ -321,11 +373,28 @@ def main():
     print(f"  Learning Rate: {lr} (reduced from 5e-5)")
     print(f"  Batch Size: {train_config.get('batch_size', 4)}")
     print(f"  Early Stopping: {patience} epochs")
+    print(f"  Freeze Stage1 epochs: {freeze_stage1_epochs}")
+    print(f"  Trainable Params: {count_trainable_params(model):,}")
     print(f"  Gradient Clipping: 0.5 (stricter)")
     print(f"{'='*60}\n")
 
     for epoch in range(epochs):
         t0 = time.time()
+
+        if freeze_stage1_epochs > 0 and epoch == freeze_stage1_epochs:
+            unfrozen_params = unfreeze_stage1_modules(model)
+            unfreeze_lr = lr * train_config.get('unfreeze_lr_scale', 0.5)
+            optimizer = build_optimizer(model, unfreeze_lr, train_config.get('weight_decay', 0.05))
+            scheduler = build_scheduler(
+                optimizer,
+                max(1, epochs - epoch),
+                max(1, train_config.get('warmup_epochs', 10) // 2),
+            )
+            msg = (f"Unfroze Stage1 modules at epoch {epoch}: "
+                   f"{unfrozen_params:,} params, lr={unfreeze_lr:.2e}, "
+                   f"trainable={count_trainable_params(model):,}")
+            logger.log_message(msg)
+            print(msg)
 
         train_metrics = train_one_epoch_stage2(
             model, train_loader, optimizer, criterion, scaler, device, epoch
