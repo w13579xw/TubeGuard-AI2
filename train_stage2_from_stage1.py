@@ -10,7 +10,12 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.amp import GradScaler, autocast
+try:
+    from torch.amp import GradScaler, autocast
+    AMP_BACKEND = 'torch.amp'
+except ImportError:
+    from torch.cuda.amp import GradScaler, autocast
+    AMP_BACKEND = 'torch.cuda.amp'
 from tqdm import tqdm
 
 from models.topovarad import TopoVarAD, TopoVarADConfig
@@ -93,6 +98,18 @@ def count_trainable_params(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
+def make_grad_scaler(device):
+    if AMP_BACKEND == 'torch.amp':
+        return GradScaler(device='cuda' if device.type == 'cuda' else 'cpu')
+    return GradScaler(enabled=(device.type == 'cuda'))
+
+
+def autocast_context(device):
+    if AMP_BACKEND == 'torch.amp':
+        return autocast(device_type='cuda' if device.type == 'cuda' else 'cpu')
+    return autocast(enabled=(device.type == 'cuda'))
+
+
 def train_one_epoch_stage2(model, loader, optimizer, criterion, scaler, device, epoch):
     model.train()
     total_loss = 0.0
@@ -108,7 +125,7 @@ def train_one_epoch_stage2(model, loader, optimizer, criterion, scaler, device, 
 
         optimizer.zero_grad()
 
-        with autocast(device_type='cuda' if device.type == 'cuda' else 'cpu'):
+        with autocast_context(device):
             outputs = model(images)
             loss_dict = criterion(outputs, stage=2)
             loss = loss_dict['loss_total']
@@ -346,7 +363,7 @@ def main():
 
     optimizer = build_optimizer(model, lr, train_config.get('weight_decay', 0.05))
     scheduler = build_scheduler(optimizer, epochs, train_config.get('warmup_epochs', 10))
-    scaler = GradScaler(device='cuda' if device.type == 'cuda' else 'cpu')
+    scaler = make_grad_scaler(device)
 
     ckpt_dir = train_config.get('checkpoint_dir', 'checkpoints')
     best_auroc = 0.0
@@ -364,6 +381,7 @@ def main():
     logger.log_message(f"  Freeze Stage1 epochs: {freeze_stage1_epochs}")
     logger.log_message(f"  Frozen Stage1 params: {frozen_params:,}")
     logger.log_message(f"  Trainable params: {count_trainable_params(model):,}")
+    logger.log_message(f"  AMP backend: {AMP_BACKEND}")
     logger.log_message(f"  Gradient clipping: 0.5 (stricter than Stage1)")
 
     print(f"\n{'='*60}")
@@ -375,6 +393,7 @@ def main():
     print(f"  Early Stopping: {patience} epochs")
     print(f"  Freeze Stage1 epochs: {freeze_stage1_epochs}")
     print(f"  Trainable Params: {count_trainable_params(model):,}")
+    print(f"  AMP Backend: {AMP_BACKEND}")
     print(f"  Gradient Clipping: 0.5 (stricter)")
     print(f"{'='*60}\n")
 
