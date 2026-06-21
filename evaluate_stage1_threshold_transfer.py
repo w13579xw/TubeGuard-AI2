@@ -116,22 +116,34 @@ def build_train_normal_dataset(config):
 
 
 @torch.no_grad()
-def score_dataset(model, dataset, device, batch_size=1, num_workers=4):
+def score_dataset(model, dataset, device, batch_size=1, num_workers=4, score_method='predict'):
     # batch_size=1 is intentional. In this codebase the superpixel tokenizer can
-    # mix token pools across images for larger batches, which changes Stage1 scores.
+    # mix token pools across images for larger batches, which changes scores.
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False,
                         num_workers=num_workers, pin_memory=True)
     model.eval()
     scores, labels, paths = [], [], []
-    for batch in tqdm(loader, desc='TopoVarAD-S1 scoring'):
+    for batch in tqdm(loader, desc=f'Scoring ({score_method})'):
         images = batch['image'].to(device)
-        outputs = model(images)
-        error = torch.abs(outputs['reconstructed'] - outputs['x_resized'])
-        img_scores = error.reshape(images.shape[0], -1).mean(dim=1)
-        scores.extend(img_scores.cpu().numpy().tolist())
+        if score_method == 'predict':
+            # Autoregressive negative-log-likelihood score (matches the
+            # 0.9788 headline produced by test_stage1.py / model.predict()).
+            image_scores, _ = model.predict(images)
+            img_scores = image_scores
+        else:
+            # Reconstruction L1 error score.
+            outputs = model(images)
+            error = torch.abs(outputs['reconstructed'] - outputs['x_resized'])
+            img_scores = error.reshape(images.shape[0], -1).mean(dim=1)
+        scores.extend(img_scores.detach().cpu().numpy().tolist())
         labels.extend(batch['label'].numpy().astype(int).tolist())
         paths.extend(batch['image_path'])
-    return np.asarray(scores, dtype=np.float64), np.asarray(labels, dtype=np.int64), paths
+    scores = np.asarray(scores, dtype=np.float64)
+    labels = np.asarray(labels, dtype=np.int64)
+    print(f"Score stats ({score_method}): min={scores.min():.6f}, max={scores.max():.6f}, "
+          f"mean={scores.mean():.6f}, AUROC={roc_auc_score(labels, scores):.4f}"
+          if len(np.unique(labels)) == 2 else f"Score stats ({score_method}): single-class labels")
+    return scores, labels, paths
 
 
 def compute_metrics(scores, labels, threshold):
@@ -201,6 +213,7 @@ def main_impl(args):
     num_workers = data_config.get('num_workers', 4)
     results = {
         'mode': args.mode,
+        'score_method': args.score_method,
         'checkpoint': args.checkpoint,
         'created_at': time.strftime('%Y-%m-%d %H:%M:%S'),
     }
@@ -208,14 +221,14 @@ def main_impl(args):
     if args.mode == 'normal_quantile':
         calib_dataset = build_train_normal_dataset(config)
         calib_scores, calib_labels, calib_paths = score_dataset(
-            model, calib_dataset, device, args.batch_size, num_workers)
+            model, calib_dataset, device, args.batch_size, num_workers, args.score_method)
         threshold = float(np.quantile(calib_scores, args.normal_quantile))
         print(f"Normal-only threshold q={args.normal_quantile}: {threshold:.8f}")
 
         eval_csv = args.eval_csv or data_config.get('test_csv', 'data/test.csv')
         eval_dataset = build_dataset(config, eval_csv, split='test')
         eval_scores, eval_labels, eval_paths = score_dataset(
-            model, eval_dataset, device, args.batch_size, num_workers)
+            model, eval_dataset, device, args.batch_size, num_workers, args.score_method)
         metrics = compute_metrics(eval_scores, eval_labels, threshold)
         save_scores(os.path.join(args.output_dir, 'calib_normal_scores.csv'), calib_scores, calib_labels, calib_paths)
         save_scores(os.path.join(args.output_dir, 'eval_scores.csv'), eval_scores, eval_labels, eval_paths)
@@ -225,7 +238,7 @@ def main_impl(args):
     elif args.mode == 'split_test':
         eval_csv = args.eval_csv or data_config.get('test_csv', 'data/test.csv')
         dataset = build_dataset(config, eval_csv, split='test')
-        scores, labels, paths = score_dataset(model, dataset, device, args.batch_size, num_workers)
+        scores, labels, paths = score_dataset(model, dataset, device, args.batch_size, num_workers, args.score_method)
         split_results = []
         for i in range(args.repeats):
             seed = args.seed + i
@@ -244,7 +257,7 @@ def main_impl(args):
     elif args.mode == 'kfold':
         eval_csv = args.eval_csv or data_config.get('test_csv', 'data/test.csv')
         dataset = build_dataset(config, eval_csv, split='test')
-        scores, labels, paths = score_dataset(model, dataset, device, args.batch_size, num_workers)
+        scores, labels, paths = score_dataset(model, dataset, device, args.batch_size, num_workers, args.score_method)
         skf = StratifiedKFold(n_splits=args.folds, shuffle=True, random_state=args.seed)
         fold_results = []
         for fold, (calib_idx, eval_idx) in enumerate(skf.split(scores, labels), start=1):
@@ -264,8 +277,8 @@ def main_impl(args):
             raise ValueError('--calib_csv and --eval_csv are required for external mode')
         calib_dataset = build_dataset(config, args.calib_csv, split='test')
         eval_dataset = build_dataset(config, args.eval_csv, split='test')
-        calib_scores, calib_labels, calib_paths = score_dataset(model, calib_dataset, device, args.batch_size, num_workers)
-        eval_scores, eval_labels, eval_paths = score_dataset(model, eval_dataset, device, args.batch_size, num_workers)
+        calib_scores, calib_labels, calib_paths = score_dataset(model, calib_dataset, device, args.batch_size, num_workers, args.score_method)
+        eval_scores, eval_labels, eval_paths = score_dataset(model, eval_dataset, device, args.batch_size, num_workers, args.score_method)
         f1max, threshold = compute_f1_max(calib_scores, calib_labels)
         metrics = compute_metrics(eval_scores, eval_labels, threshold)
         save_scores(os.path.join(args.output_dir, 'calib_scores.csv'), calib_scores, calib_labels, calib_paths)
@@ -288,6 +301,8 @@ def parse_args():
     parser.add_argument('--config', type=str, default='configs/default.yaml')
     parser.add_argument('--checkpoint', type=str, required=True)
     parser.add_argument('--mode', choices=['normal_quantile', 'split_test', 'kfold', 'external'], default='kfold')
+    parser.add_argument('--score_method', choices=['predict', 'reconstruction'], default='predict',
+                        help='predict = autoregressive NLL (matches 0.9788 headline); reconstruction = L1 error')
     parser.add_argument('--output_dir', type=str, default='logs/stage1_threshold_validation')
     parser.add_argument('--calib_csv', type=str, default=None)
     parser.add_argument('--eval_csv', type=str, default=None)
