@@ -98,6 +98,15 @@ def count_trainable_params(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
+def set_tar_requires_grad(model, requires_grad):
+    n = 0
+    if getattr(model, 'tar', None) is not None:
+        for p in model.tar.parameters():
+            p.requires_grad_(requires_grad)
+            n += p.numel()
+    return n
+
+
 def make_grad_scaler(device):
     if AMP_BACKEND == 'torch.amp':
         return GradScaler(device='cuda' if device.type == 'cuda' else 'cpu')
@@ -276,6 +285,12 @@ def main():
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--freeze_stage1_epochs', type=int, default=None,
                         help='Freeze Stage1 modules for N Stage2 epochs; 0=always frozen, -1=never freeze')
+    parser.add_argument('--kmeans_init', action='store_true', default=None,
+                        help='K-means init RQ-VAE codebook from Stage1 features before training')
+    parser.add_argument('--no_kmeans_init', dest='kmeans_init', action='store_false',
+                        help='Disable K-means codebook init')
+    parser.add_argument('--tar_warmup_epochs', type=int, default=None,
+                        help='Freeze TAR head for the first N epochs, training only RQ-VAE')
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -350,6 +365,27 @@ def main():
     else:
         print("Stage1 freezing disabled")
 
+    # ---- 码本K-means初始化（缓解codebook collapse）----
+    kmeans_init = args.kmeans_init
+    if kmeans_init is None:
+        kmeans_init = train_config.get('kmeans_init', True)
+    if kmeans_init:
+        n_feat = model.init_codebook_from_loader(
+            train_loader, device,
+            max_batches=train_config.get('kmeans_init_batches', 50),
+            n_iter=train_config.get('kmeans_iter', 10),
+        )
+        print(f"K-means codebook init done from {n_feat} Stage1 features")
+        print(f"  Codebook usage after init: {[f'{u:.2%}' for u in model.rqvae.rq.get_codebook_usage()]}")
+
+    # ---- TAR warmup：前N个epoch冻结TAR，只训练RQ-VAE让码本稳定 ----
+    tar_warmup_epochs = args.tar_warmup_epochs
+    if tar_warmup_epochs is None:
+        tar_warmup_epochs = train_config.get('tar_warmup_epochs', 5)
+    if tar_warmup_epochs > 0:
+        frozen_tar = set_tar_requires_grad(model, False)
+        print(f"TAR warmup: froze TAR head ({frozen_tar:,} params) for first {tar_warmup_epochs} epochs")
+
     criterion = TopoVarADLoss(
         lambda_lpips=train_config.get('lambda_lpips', 0.1),
         lambda_rqvae=train_config.get('lambda_rqvae', 0.5),
@@ -367,8 +403,6 @@ def main():
 
     ckpt_dir = train_config.get('checkpoint_dir', 'checkpoints')
     best_auroc = 0.0
-    patience = train_config.get('early_stopping', 20)
-    patience_counter = 0
 
     log_dir = train_config.get('log_dir', 'logs')
     logger = TrainingLogger(log_dir=log_dir, stage=2)
@@ -376,7 +410,7 @@ def main():
     logger.log_message(f"  Stage1 checkpoint: {args.stage1_checkpoint}")
     logger.log_message(f"  Stage1 ended at epoch: {stage1_epoch}")
     logger.log_message(f"  Epochs: {epochs}, LR: {lr}, Batch Size: {train_config.get('batch_size', 4)}")
-    logger.log_message(f"  Early Stopping: {patience} epochs, Device: {device}")
+    logger.log_message(f"  Early stopping: disabled (train full {epochs} epochs), Device: {device}")
     logger.log_message(f"  Model parameters: {total_params:,}")
     logger.log_message(f"  Freeze Stage1 epochs: {freeze_stage1_epochs}")
     logger.log_message(f"  Frozen Stage1 params: {frozen_params:,}")
@@ -390,7 +424,7 @@ def main():
     print(f"  Epochs: {epochs}")
     print(f"  Learning Rate: {lr} (reduced from 5e-5)")
     print(f"  Batch Size: {train_config.get('batch_size', 4)}")
-    print(f"  Early Stopping: {patience} epochs")
+    print(f"  Early Stopping: disabled (full {epochs} epochs)")
     print(f"  Freeze Stage1 epochs: {freeze_stage1_epochs}")
     print(f"  Trainable Params: {count_trainable_params(model):,}")
     print(f"  AMP Backend: {AMP_BACKEND}")
@@ -399,6 +433,15 @@ def main():
 
     for epoch in range(epochs):
         t0 = time.time()
+
+        if tar_warmup_epochs > 0 and epoch == tar_warmup_epochs:
+            unfrozen_tar = set_tar_requires_grad(model, True)
+            optimizer = build_optimizer(model, optimizer.param_groups[0]['lr'],
+                                        train_config.get('weight_decay', 0.05))
+            msg = (f"TAR warmup ended at epoch {epoch}: unfroze TAR ({unfrozen_tar:,} params), "
+                   f"trainable={count_trainable_params(model):,}")
+            logger.log_message(msg)
+            print(msg)
 
         if freeze_stage1_epochs > 0 and epoch == freeze_stage1_epochs:
             unfrozen_params = unfreeze_stage1_modules(model)
@@ -441,17 +484,11 @@ def main():
 
             if eval_metrics.get('I-AUROC', 0) > best_auroc:
                 best_auroc = eval_metrics['I-AUROC']
-                patience_counter = 0
                 save_checkpoint(
                     model, optimizer, scheduler, epoch, train_metrics['loss'],
                     os.path.join(ckpt_dir, 'stage2_best.pth')
                 )
                 print(f"  -> Best model saved (I-AUROC={best_auroc:.4f})")
-            else:
-                patience_counter += 10
-                if patience_counter >= patience:
-                    logger.log_message(f"Early stopping at epoch {epoch+1}")
-                    break
 
         logger.log_epoch(epoch, train_metrics, eval_metrics, lr_current, elapsed)
 

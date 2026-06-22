@@ -22,6 +22,40 @@ class VectorQuantizer(nn.Module):
         self.register_buffer('embedding', embedding)
         self.register_buffer('ema_count', torch.zeros(n_codes))
         self.register_buffer('ema_weight', embedding.clone())
+        self.register_buffer('initialized', torch.zeros(1))
+
+    @torch.no_grad()
+    def init_codebook_kmeans(self, residual, n_iter=10):
+        """用一批残差向量做K-means初始化码本，缓解codebook collapse。
+        residual: (N, d_code) 输入残差样本
+        """
+        n_samples = residual.shape[0]
+        if n_samples < self.n_codes:
+            # 样本不足，重复采样填满
+            reps = (self.n_codes // n_samples) + 1
+            residual = residual.repeat(reps, 1)
+            n_samples = residual.shape[0]
+
+        # 随机选 n_codes 个点作为初始中心
+        perm = torch.randperm(n_samples, device=residual.device)[:self.n_codes]
+        centers = residual[perm].clone()
+
+        for _ in range(n_iter):
+            dist = (
+                residual.pow(2).sum(dim=-1, keepdim=True)
+                - 2 * residual @ centers.t()
+                + centers.pow(2).sum(dim=-1).unsqueeze(0)
+            )
+            assign = dist.argmin(dim=-1)
+            for k in range(self.n_codes):
+                mask = assign == k
+                if mask.any():
+                    centers[k] = residual[mask].mean(dim=0)
+
+        self.embedding.copy_(centers)
+        self.ema_weight.copy_(centers)
+        self.ema_count.fill_(1.0)
+        self.initialized.fill_(1.0)
 
     def forward(self, z):
         """
@@ -63,6 +97,17 @@ class VectorQuantizer(nn.Module):
                 self.embedding.copy_(
                     self.ema_weight / self.ema_count.unsqueeze(-1)
                 )
+
+                # 死码重激活：将长期未使用的码本随机替换为当前batch中的活跃向量，
+                # 缓解chronic codebook collapse。
+                if self.training_step % 100 == 0:
+                    dead = self.ema_count < 1e-3
+                    n_dead = int(dead.sum().item())
+                    if n_dead > 0 and z.shape[0] > 0:
+                        idx = torch.randint(0, z.shape[0], (n_dead,), device=z.device)
+                        self.embedding[dead] = z[idx].detach()
+                        self.ema_weight[dead] = z[idx].detach()
+                        self.ema_count[dead] = 1.0
 
         commitment_loss = F.mse_loss(z, z_q.detach())
         vq_loss = self.commitment_cost * commitment_loss
@@ -173,6 +218,25 @@ class ResidualQuantizer(nn.Module):
             usage.append(active / self.n_codes)
         return usage
 
+    @torch.no_grad()
+    def init_codebook_kmeans(self, z, n_iter=10):
+        """对每层量化器用真实残差做K-means初始化。
+        z: (N, d_model) 一批来自pool_head的特征
+        """
+        z_proj = self.proj_in(z)
+        residual = z_proj
+        for quantizer in self.quantizers:
+            quantizer.init_codebook_kmeans(residual, n_iter=n_iter)
+            # 用初始化后的码本算出量化结果，传递残差给下一层
+            dist = (
+                residual.pow(2).sum(dim=-1, keepdim=True)
+                - 2 * residual @ quantizer.embedding.t()
+                + quantizer.embedding.pow(2).sum(dim=-1).unsqueeze(0)
+            )
+            codes = dist.argmin(dim=-1)
+            z_q = F.embedding(codes, quantizer.embedding)
+            residual = residual - z_q
+
 
 class RQVAEEncoder(nn.Module):
     """
@@ -203,6 +267,12 @@ class RQVAEEncoder(nn.Module):
 
     def decode(self, codes):
         return self.rq.decode(codes)
+
+    @torch.no_grad()
+    def init_codebook_kmeans(self, z, n_iter=10):
+        """用一批pool_head特征对码本做K-means初始化。"""
+        z = self.mlp(z)
+        self.rq.init_codebook_kmeans(z, n_iter=n_iter)
 
 
 if __name__ == "__main__":

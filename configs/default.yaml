@@ -28,6 +28,11 @@ train:
   use_sampler: true
   early_stopping: 20
   label_smoothing: 0.1
+  freeze_stage1_epochs: 10
+  kmeans_init: true
+  kmeans_init_batches: 50
+  kmeans_iter: 10
+  tar_warmup_epochs: 5
 
 data:
   dataset_type: csv

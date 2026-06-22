@@ -287,6 +287,29 @@ class TopoVarAD(nn.Module):
         """设置训练阶段"""
         self.stage = stage
 
+    @torch.no_grad()
+    def extract_global_features(self, x):
+        """提取一批图像的全局特征 z_global，用于码本初始化。
+        x: (B, 3, H, W) -> (B, d_model)
+        """
+        tokens, sp_labels, M, N = self._tokenize(x)
+        refined = self.tpm(tokens, sp_labels, M, N)
+        return self.pool_head(refined)
+
+    @torch.no_grad()
+    def init_codebook_from_loader(self, loader, device, max_batches=50, n_iter=10):
+        """用训练数据的全局特征对RQ-VAE码本做K-means初始化。"""
+        self.eval()
+        feats = []
+        for i, batch in enumerate(loader):
+            if i >= max_batches:
+                break
+            images = batch['image'].to(device)
+            feats.append(self.extract_global_features(images).cpu())
+        feats = torch.cat(feats, dim=0).to(device)
+        self.rqvae.init_codebook_kmeans(feats, n_iter=n_iter)
+        return feats.shape[0]
+
     def _compute_lpips(self, x, y):
         """简化的感知损失：基于特征的MSE近似LPIPS。"""
         x_norm = (x - 0.5) / 0.5
