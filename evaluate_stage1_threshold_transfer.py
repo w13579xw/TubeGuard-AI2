@@ -75,7 +75,7 @@ def build_model(config, checkpoint, device):
     )
     model = topo_config.build_model().to(device)
     ckpt = torch.load(checkpoint, map_location=device)
-    model.load_state_dict(ckpt['model_state_dict'])
+    model.load_state_dict(ckpt['model_state_dict'], strict=False)
     model.set_stage(1)
     model.eval()
     print(f"Loaded Stage1 checkpoint: {checkpoint}")

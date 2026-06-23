@@ -56,9 +56,15 @@ def save_checkpoint(model, optimizer, scheduler, epoch, loss, path):
 
 
 def load_stage1_checkpoint(model, path):
-    """加载Stage1的模型权重，只加载模型参数"""
+    """加载Stage1的模型权重，只加载模型参数。
+    strict=False 以兼容新增的码本buffer（如 initialized），这些buffer会用默认值或随后由K-means初始化覆盖。
+    """
     ckpt = torch.load(path, map_location='cpu')
-    model.load_state_dict(ckpt['model_state_dict'])
+    missing, unexpected = model.load_state_dict(ckpt['model_state_dict'], strict=False)
+    if missing:
+        print(f"  [load] missing keys (use defaults): {missing}")
+    if unexpected:
+        print(f"  [load] unexpected keys (ignored): {unexpected}")
     print(f"Loaded Stage1 checkpoint from {path}")
     print(f"  Stage1 ended at epoch {ckpt['epoch']}, loss={ckpt['loss']:.4f}")
     return ckpt['epoch']

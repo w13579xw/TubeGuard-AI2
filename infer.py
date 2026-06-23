@@ -43,7 +43,7 @@ def load_model(config, checkpoint_path, device):
 
     if checkpoint_path and os.path.exists(checkpoint_path):
         ckpt = torch.load(checkpoint_path, map_location=device)
-        model.load_state_dict(ckpt['model_state_dict'])
+        model.load_state_dict(ckpt['model_state_dict'], strict=False)
         print(f"Loaded checkpoint: {checkpoint_path} (epoch {ckpt.get('epoch', '?')})")
     else:
         print("Warning: No checkpoint loaded, using random weights")
