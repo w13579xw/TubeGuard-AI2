@@ -85,11 +85,13 @@ class VectorQuantizer(nn.Module):
                 current_decay = self.decay
 
             with torch.no_grad():
-                one_hot = F.one_hot(codes, self.n_codes).float()
+                # AMP下z可能是half，码本buffer是float32，统一dtype避免index/matmul报错
+                z_buf = z.detach().to(self.embedding.dtype)
+                one_hot = F.one_hot(codes, self.n_codes).to(self.embedding.dtype)
                 count = one_hot.sum(dim=0)
                 self.ema_count.mul_(current_decay).add_(count, alpha=1 - current_decay)
 
-                weight_sum = one_hot.t() @ z
+                weight_sum = one_hot.t() @ z_buf
                 self.ema_weight.mul_(current_decay).add_(weight_sum, alpha=1 - current_decay)
 
                 n = self.ema_count.sum()
@@ -103,10 +105,10 @@ class VectorQuantizer(nn.Module):
                 if self.training_step % 100 == 0:
                     dead = self.ema_count < 1e-3
                     n_dead = int(dead.sum().item())
-                    if n_dead > 0 and z.shape[0] > 0:
-                        idx = torch.randint(0, z.shape[0], (n_dead,), device=z.device)
-                        self.embedding[dead] = z[idx].detach()
-                        self.ema_weight[dead] = z[idx].detach()
+                    if n_dead > 0 and z_buf.shape[0] > 0:
+                        idx = torch.randint(0, z_buf.shape[0], (n_dead,), device=z_buf.device)
+                        self.embedding[dead] = z_buf[idx]
+                        self.ema_weight[dead] = z_buf[idx]
                         self.ema_count[dead] = 1.0
 
         commitment_loss = F.mse_loss(z, z_q.detach())
