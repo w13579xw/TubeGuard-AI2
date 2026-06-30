@@ -449,18 +449,12 @@ def main():
             logger.log_message(msg)
             print(msg)
 
+        # ✅ 改进：全程冻结 Stage1 模块，不做解冻
+        # 这样可以 100% 保证 Stage2 不会破坏 Stage1 学到的优秀特征
+        # 只训练 RQVAE 和 TAR head，做增量改进
         if freeze_stage1_epochs > 0 and epoch == freeze_stage1_epochs:
-            unfrozen_params = unfreeze_stage1_modules(model)
-            unfreeze_lr = lr * train_config.get('unfreeze_lr_scale', 0.5)
-            optimizer = build_optimizer(model, unfreeze_lr, train_config.get('weight_decay', 0.05))
-            scheduler = build_scheduler(
-                optimizer,
-                max(1, epochs - epoch),
-                max(1, train_config.get('warmup_epochs', 10) // 2),
-            )
-            msg = (f"Unfroze Stage1 modules at epoch {epoch}: "
-                   f"{unfrozen_params:,} params, lr={unfreeze_lr:.2e}, "
-                   f"trainable={count_trainable_params(model):,}")
+            msg = (f"✅ Stage1 modules REMAIN FROZEN at epoch {epoch}: "
+                   f"Stage1 特征全程保留，只训练 RQVAE + TAR")
             logger.log_message(msg)
             print(msg)
 
