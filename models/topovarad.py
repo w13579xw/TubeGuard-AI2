@@ -260,7 +260,8 @@ class TopoVarAD(nn.Module):
     def predict(self, x):
         """
         ✅ 改进版推理接口：融合重建误差 + AR 似然分数
-        保证效果至少不比 Stage1 差
+        image_scores 直接用重建误差（保证与 Stage1 完全一致）
+        pixel_scores 融合两者（Stage2 增量改进）
         x: (B, 3, H, W)
         返回:
             image_scores: (B,) 图像级异常分数
@@ -270,41 +271,49 @@ class TopoVarAD(nn.Module):
         with torch.no_grad():
             tokens, sp_labels, M, N = self._tokenize(x)
             refined = self.tpm(tokens, sp_labels, M, N)
+            B, C, H, W = x.shape
 
             # ========== Stage1 分数：重建误差（永远保留！这是性能底线）==========
             x_recon = self.pixel_head(refined, M, N)
             H_target = M * 16
             W_target = N * 16
             x_resized = F.interpolate(x, size=(H_target, W_target), mode='bilinear', align_corners=False)
-            recon_error = F.l1_loss(x_recon, x_resized, reduction='none').mean(dim=1)  # (B, Hr, Wr)
-            recon_score = recon_error.mean(dim=[1, 2])  # (B,)
+            recon_error_small = F.l1_loss(x_recon, x_resized, reduction='none').mean(dim=1)  # (B, Hr, Wr)
+            recon_score = recon_error_small.mean(dim=[1, 2])  # (B,)
 
-            # ========== Stage2 分数：AR 似然（可选增强）==========
+            # 上采样重建误差到原始图像大小
+            recon_error = F.interpolate(
+                recon_error_small.unsqueeze(1),
+                size=(H, W), mode='bilinear', align_corners=False
+            ).squeeze(1)  # (B, H, W)
+
             if self.stage == 1:
-                # Stage1 模式，只用重建误差
+                # Stage1 模式：只用重建误差
                 image_scores = recon_score
                 pixel_scores = recon_error
             else:
-                # Stage2 模式：融合重建误差 + AR 似然
+                # ========== Stage2 模式：Stage1 分数为主 + AR 增量 ==========
                 z_global = self.pool_head(refined)
                 codes = self.rqvae.encode(z_global)
                 token_scores, ar_score = self.tar.compute_anomaly_score(codes, z_global)
 
-                # ========== 分数融合（核心改进）==========
-                # alpha=0.7 表示重建误差权重 70%，AR 权重 30%
-                # 确保 AR 只做增量改进，不会破坏 Stage1 的优秀性能
-                alpha = 0.7
-                image_scores = alpha * recon_score + (1 - alpha) * ar_score
+                # ⚠️ AR score 尺度约 7，recon score 尺度约 0.02，直接加权会被 AR 主导
+                # 图像级：直接用 recon_score，保证与 Stage1 完全一致（性能底线）
+                image_scores = recon_score
 
-                # 像素级也融合
-                B, C, H, W = x.shape
+                # 像素级：融合（归一化后）
                 pixel_from_ar = token_scores.mean(dim=-1)
                 pixel_from_ar = pixel_from_ar.unsqueeze(1).unsqueeze(1).expand(B, M, N)
                 pixel_from_ar = F.interpolate(
                     pixel_from_ar.unsqueeze(1).float(),
                     size=(H, W), mode='bilinear', align_corners=False
-                ).squeeze(1)
-                pixel_scores = alpha * recon_error + (1 - alpha) * pixel_from_ar
+                ).squeeze(1)  # (B, H, W)
+
+                # 归一化到相同尺度后融合
+                alpha = 0.7  # 重建误差权重（主导）
+                recon_norm = recon_error / (recon_error.mean(dim=[1, 2], keepdim=True) + 1e-8)
+                ar_norm = pixel_from_ar / (pixel_from_ar.mean(dim=[1, 2], keepdim=True) + 1e-8)
+                pixel_scores = alpha * recon_norm + (1 - alpha) * ar_norm
 
         return image_scores, pixel_scores
 
