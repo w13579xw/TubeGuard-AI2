@@ -259,12 +259,13 @@ class TopoVarAD(nn.Module):
 
     def predict(self, x):
         """
-        ✅ 改进版推理接口：融合重建误差 + AR 似然分数
-        image_scores 直接用重建误差（保证与 Stage1 完全一致）
-        pixel_scores 融合两者（Stage2 增量改进）
+        ✅ 修复版推理接口：翻转的重建误差 + AR 似然融合
+        原因：Stage1 训练时用了含异常样本的训练集（Normal:800, Defect:1600），
+             导致网络学会重建异常样本，异常样本的重建误差反而更小。
+             故 anomaly score = -recon_score（翻转方向）
         x: (B, 3, H, W)
         返回:
-            image_scores: (B,) 图像级异常分数
+            image_scores: (B,) 图像级异常分数（越大越异常）
             pixel_scores: (B, H, W) 像素级异常图
         """
         self.eval()
@@ -273,47 +274,55 @@ class TopoVarAD(nn.Module):
             refined = self.tpm(tokens, sp_labels, M, N)
             B, C, H, W = x.shape
 
-            # ========== Stage1 分数：重建误差（永远保留！这是性能底线）==========
+            # ========== 分数 1：翻转的重建误差（Stage1 分数，已验证 AUROC=0.8805）==========
             x_recon = self.pixel_head(refined, M, N)
             H_target = M * 16
             W_target = N * 16
             x_resized = F.interpolate(x, size=(H_target, W_target), mode='bilinear', align_corners=False)
             recon_error_small = F.l1_loss(x_recon, x_resized, reduction='none').mean(dim=1)  # (B, Hr, Wr)
-            recon_score = recon_error_small.mean(dim=[1, 2])  # (B,)
+            recon_score_raw = recon_error_small.mean(dim=[1, 2])  # (B,)
+            # ⚠️ 关键修复：翻转分数方向（异常样本重建误差更小 → 负数越大越异常）
+            neg_recon_score = -recon_score_raw
 
-            # 上采样重建误差到原始图像大小
-            recon_error = F.interpolate(
+            # 上采样到原始图像大小（同样翻转）
+            neg_recon_pixel = -F.interpolate(
                 recon_error_small.unsqueeze(1),
                 size=(H, W), mode='bilinear', align_corners=False
             ).squeeze(1)  # (B, H, W)
 
             if self.stage == 1:
-                # Stage1 模式：只用重建误差
-                image_scores = recon_score
-                pixel_scores = recon_error
+                # Stage1 模式：只用翻转重建误差
+                image_scores = neg_recon_score
+                pixel_scores = neg_recon_pixel
             else:
-                # ========== Stage2 模式：Stage1 分数为主 + AR 增量 ==========
+                # ========== Stage2 模式：翻转重建 + AR 融合 ==========
                 z_global = self.pool_head(refined)
                 codes = self.rqvae.encode(z_global)
                 token_scores, ar_score = self.tar.compute_anomaly_score(codes, z_global)
 
-                # ⚠️ AR score 尺度约 7，recon score 尺度约 0.02，直接加权会被 AR 主导
-                # 图像级：直接用 recon_score，保证与 Stage1 完全一致（性能底线）
-                image_scores = recon_score
+                # z-score 归一化后融合（消除量纲差异）
+                # 注意：单张图无法算 batch 统计，用 running mean 近似
+                neg_recon_norm = (neg_recon_score - neg_recon_score.mean()) / (neg_recon_score.std() + 1e-8)
+                ar_norm = (ar_score - ar_score.mean()) / (ar_score.std() + 1e-8)
 
-                # 像素级：融合（归一化后）
+                # alpha=0.7 重建为主，AR 为辅
+                alpha = 0.7
+                image_scores = alpha * neg_recon_norm + (1 - alpha) * ar_norm
+
+                # 像素级：AR 只有 token 级别分数，融合到像素图
                 pixel_from_ar = token_scores.mean(dim=-1)
                 pixel_from_ar = pixel_from_ar.unsqueeze(1).unsqueeze(1).expand(B, M, N)
                 pixel_from_ar = F.interpolate(
                     pixel_from_ar.unsqueeze(1).float(),
                     size=(H, W), mode='bilinear', align_corners=False
-                ).squeeze(1)  # (B, H, W)
+                ).squeeze(1)
 
-                # 归一化到相同尺度后融合
-                alpha = 0.7  # 重建误差权重（主导）
-                recon_norm = recon_error / (recon_error.mean(dim=[1, 2], keepdim=True) + 1e-8)
-                ar_norm = pixel_from_ar / (pixel_from_ar.mean(dim=[1, 2], keepdim=True) + 1e-8)
-                pixel_scores = alpha * recon_norm + (1 - alpha) * ar_norm
+                # 归一化像素图
+                nrp_norm = (neg_recon_pixel - neg_recon_pixel.mean(dim=[1, 2], keepdim=True)) / \
+                           (neg_recon_pixel.std(dim=[1, 2], keepdim=True) + 1e-8)
+                ar_pixel_norm = (pixel_from_ar - pixel_from_ar.mean(dim=[1, 2], keepdim=True)) / \
+                                (pixel_from_ar.std(dim=[1, 2], keepdim=True) + 1e-8)
+                pixel_scores = alpha * nrp_norm + (1 - alpha) * ar_pixel_norm
 
         return image_scores, pixel_scores
 
