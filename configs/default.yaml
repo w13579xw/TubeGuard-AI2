@@ -12,16 +12,18 @@ model:
 
 train:
   stage1_epochs: 100
-  stage2_epochs: 40  # ✅ Stage1 全程冻结后，只训 6M 参数，30-40 epoch 足够收敛
+  stage2_epochs: 30  # ✅ 加对比学习后收敛快，30 epoch 足够
   batch_size: 32  # ✅ 24G 显存可跑更大 batch，加速训练
   lr_stage1: 1.0e-4
   lr_stage2: 2.0e-5  # ✅ 因为 batch 加倍，lr 也线性缩放（1e-5 → 2e-5）
   weight_decay: 0.05
-  warmup_epochs: 5   # ✅ epoch 少了，warmup 也相应缩短
+  warmup_epochs: 3   # ✅ epoch 少了，warmup 也相应缩短
   lambda_lpips: 0.1
   lambda_rqvae: 0.5
-  lambda_ar: 1.0
-  lambda_diversity: 0.0  # 关闭多样性损失（副作用太大）
+  lambda_ar: 0.5      # ✅ 降低 AR 权重（AR 不是主要目标）
+  lambda_diversity: 0.0
+  lambda_contrastive: 5.0  # ✅ 新增：弱监督对比学习权重
+  contrastive_margin: 0.05  # ✅ 新增：正常 vs 异常的 rqvae_dist 应差 >= margin
   checkpoint_dir: checkpoints/
   log_dir: logs/
   augment: true

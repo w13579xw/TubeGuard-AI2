@@ -125,18 +125,21 @@ def autocast_context(device):
     return autocast(enabled=(device.type == 'cuda'))
 
 
-def train_one_epoch_stage2(model, loader, optimizer, criterion, scaler, device, epoch):
+def train_one_epoch_stage2(model, loader, optimizer, criterion, scaler, device, epoch,
+                           contrastive_margin=1.0, lambda_contrastive=1.0):
     model.train()
     total_loss = 0.0
     total_pixel = 0.0
     total_rqvae = 0.0
     total_ar = 0.0
     total_diversity = 0.0
+    total_contrastive = 0.0
     n_batches = 0
 
     pbar = tqdm(loader, desc=f'[Stage2] Epoch {epoch}', leave=False)
     for batch in pbar:
         images = batch['image'].to(device)
+        labels = batch['label'].to(device).float()  # (B,) 0=normal, 1=defect
 
         optimizer.zero_grad()
 
@@ -144,6 +147,33 @@ def train_one_epoch_stage2(model, loader, optimizer, criterion, scaler, device, 
             outputs = model(images)
             loss_dict = criterion(outputs, stage=2)
             loss = loss_dict['loss_total']
+
+            # ========== 新增：弱监督对比学习 ==========
+            # 强制正常样本的 rqvae_dist 小、异常样本的 rqvae_dist 大
+            # 这样 codes 才会真正区分正常 vs 异常
+            z_global = outputs['z_global']  # (B, D)
+            # 重新过一次 RQ-VAE 拿 z_hat（因为 outputs['codes'] 是索引，不是量化重建）
+            z_hat, codes, _, _ = model.rqvae(z_global)
+            rqvae_dist = torch.nn.functional.mse_loss(z_hat, z_global, reduction='none').mean(dim=-1)  # (B,)
+
+            # 弱监督：正常样本 rqvae_dist 应 < margin，异常样本 rqvae_dist 应 > margin
+            # 使用 Margin Ranking Loss 思想：
+            #   normal_dist 应尽量小（推向 0）
+            #   defect_dist 应尽量大（推向 margin）
+            normal_mask = (labels == 0)
+            defect_mask = (labels == 1)
+
+            loss_contrastive = torch.tensor(0.0, device=device)
+            if normal_mask.sum() > 0 and defect_mask.sum() > 0:
+                normal_dist = rqvae_dist[normal_mask].mean()
+                defect_dist = rqvae_dist[defect_mask].mean()
+                # 目标：defect_dist - normal_dist >= margin
+                loss_contrastive = torch.clamp(contrastive_margin - (defect_dist - normal_dist), min=0.0)
+            elif normal_mask.sum() > 0:
+                # 只有正常样本，直接压低
+                loss_contrastive = rqvae_dist[normal_mask].mean()
+
+            loss = loss + lambda_contrastive * loss_contrastive
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
@@ -157,12 +187,13 @@ def train_one_epoch_stage2(model, loader, optimizer, criterion, scaler, device, 
         total_rqvae += loss_dict['loss_rqvae'].item()
         total_ar += loss_dict['loss_ar'].item()
         total_diversity += loss_dict.get('loss_diversity', torch.tensor(0.0)).item()
+        total_contrastive += loss_contrastive.item() if isinstance(loss_contrastive, torch.Tensor) else 0.0
         n_batches += 1
 
         pbar.set_postfix({
             'loss': f'{loss.item():.4f}',
             'ar': f'{loss_dict["loss_ar"].item():.4f}',
-            'div': f'{loss_dict.get("loss_diversity", torch.tensor(0.0)).item():.4f}',
+            'contra': f'{loss_contrastive.item() if isinstance(loss_contrastive, torch.Tensor) else 0:.4f}',
         })
 
     return {
@@ -171,6 +202,7 @@ def train_one_epoch_stage2(model, loader, optimizer, criterion, scaler, device, 
         'loss_rqvae': total_rqvae / max(n_batches, 1),
         'loss_ar': total_ar / max(n_batches, 1),
         'loss_diversity': total_diversity / max(n_batches, 1),
+        'loss_contrastive': total_contrastive / max(n_batches, 1),
     }
 
 
@@ -459,7 +491,9 @@ def main():
             print(msg)
 
         train_metrics = train_one_epoch_stage2(
-            model, train_loader, optimizer, criterion, scaler, device, epoch
+            model, train_loader, optimizer, criterion, scaler, device, epoch,
+            contrastive_margin=train_config.get('contrastive_margin', 1.0),
+            lambda_contrastive=train_config.get('lambda_contrastive', 1.0),
         )
 
         scheduler.step()
