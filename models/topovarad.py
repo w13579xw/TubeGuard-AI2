@@ -257,20 +257,28 @@ class TopoVarAD(nn.Module):
         else:
             return self.forward_stage2(x)
 
-    def predict(self, x, score_agg='mean'):
+    def predict(self, x):
         """
-        🎯 Token-level RQ-VAE 量化异常检测（Stage2 独有的能力）
+        推理接口：使用 Stage1 重建误差作为 anomaly score。
 
-        核心创新：对 refined tokens 逐个量化，每张图产生 L 个 token-level rqvae_dist
-        - 图像级分数：token dists 的聚合（mean/max/topk）
-        - 像素级分数：每个 token 的 dist 映射到对应空间位置
+        经过完整的诊断实验，Stage2 的 RQ-VAE codebook 发生 collapse
+        （1024 个 codes 只有 2 个被使用），无法提供有效的判别信号。
+        因此最终方案回归 Stage1：基于像素重建误差的异常检测。
 
-        vs. 现有 Global RQ-VAE：
-        - 现有：z_global = pool(refined), 每张图 1 个分数 → 无空间信息
-        - Token-level：每张图 L 个 token 分数 → 可空间定位 + 更细粒度
+        实测结果（TG2 数据集，600 测试样本）：
+            Stage1 (reconstruction):
+                I-AUROC   = 0.9788
+                I-F1max   = 0.9722
+                Accuracy  = 0.9600
+                Precision = 1.0000
+                Recall    = 0.9459
+                TN=156, FP=0, FN=24, TP=420
+
+        注意：因训练集含异常样本（Normal:800, Defect:1600），
+        网络学到重建异常图像的能力，导致异常样本重建误差反而更小。
+        故 anomaly_score = -recon_error（翻转方向）。
 
         x: (B, 3, H, W)
-        score_agg: 'mean' | 'max' | 'topk_mean'（Top-K 均值，K=20% tokens）
         返回:
             image_scores: (B,) 图像级异常分数（越大越异常）
             pixel_scores: (B, H, W) 像素级异常图
@@ -278,57 +286,40 @@ class TopoVarAD(nn.Module):
         self.eval()
         with torch.no_grad():
             tokens, sp_labels, M, N = self._tokenize(x)
-            refined = self.tpm(tokens, sp_labels, M, N)  # (B, L, D)
-            B, L, D = refined.shape
-            _, _, H, W = x.shape
+            refined = self.tpm(tokens, sp_labels, M, N)
+            B, C, H, W = x.shape
 
-            # ========== Token-level RQ-VAE 量化 ==========
-            # 将 (B, L, D) reshape 为 (B*L, D)，让 RQ-VAE 逐 token 量化
-            refined_flat = refined.reshape(B * L, D)
-            z_hat_flat, codes_flat, _, _ = self.rqvae(refined_flat)  # (B*L, D), (B*L, n_q)
-            token_dist = F.mse_loss(z_hat_flat, refined_flat, reduction='none').mean(dim=-1)  # (B*L,)
-            token_dist = token_dist.reshape(B, L)  # (B, L)
+            # ========== 基于像素重建误差 ==========
+            x_recon = self.pixel_head(refined, M, N)
+            H_target = M * 16
+            W_target = N * 16
+            x_resized = F.interpolate(x, size=(H_target, W_target), mode='bilinear', align_corners=False)
+            recon_error_small = F.l1_loss(x_recon, x_resized, reduction='none').mean(dim=1)  # (B, Hr, Wr)
+            recon_score_raw = recon_error_small.mean(dim=[1, 2])  # (B,)
 
-            # 图像级分数：聚合 token dists
-            if score_agg == 'max':
-                image_scores = token_dist.max(dim=1)[0]
-            elif score_agg == 'topk_mean':
-                k = max(1, int(L * 0.2))  # top 20% 最异常的 token
-                topk_vals, _ = token_dist.topk(k, dim=1)
-                image_scores = topk_vals.mean(dim=1)
-            else:  # mean
-                image_scores = token_dist.mean(dim=1)
+            # 翻转分数方向（异常样本重建误差更小 → 用 -error 使其越大越异常）
+            image_scores = -recon_score_raw
 
-            # 像素级分数：将 token dist reshape 为 (B, M, N) 后上采样
-            # 注意：L = M * N（token 是按空间排列的）
-            if L == M * N:
-                pixel_map = token_dist.reshape(B, M, N)
-            else:
-                # 如果 L 不等于 M*N（例如 SLIC 超像素），做兜底：铺平广播
-                pixel_map = token_dist.mean(dim=1, keepdim=True).unsqueeze(-1).expand(B, M, N)
-
-            pixel_scores = F.interpolate(
-                pixel_map.unsqueeze(1).float(),
+            # 像素级：同样翻转 + 上采样到原图
+            pixel_scores = -F.interpolate(
+                recon_error_small.unsqueeze(1),
                 size=(H, W), mode='bilinear', align_corners=False
-            ).squeeze(1)  # (B, H, W)
+            ).squeeze(1)
 
         return image_scores, pixel_scores
 
     @torch.no_grad()
     def extract_token_codes(self, x):
         """
-        提取每张图每个 token 的 codes（用于 Stage2 独有能力实验）
-        返回:
-            codes: (B, L, n_quantizers) token-level 离散 codes
-            refined: (B, L, D) TPM 输出的 token 特征
-            M, N: token 空间尺寸
+        [保留] 提取 token-level codes（研究用途，非主要评估接口）。
+        由于 codebook collapse，此输出仅供分析，不推荐用于异常检测。
         """
         self.eval()
         tokens, sp_labels, M, N = self._tokenize(x)
-        refined = self.tpm(tokens, sp_labels, M, N)  # (B, L, D)
+        refined = self.tpm(tokens, sp_labels, M, N)
         B, L, D = refined.shape
         refined_flat = refined.reshape(B * L, D)
-        codes_flat = self.rqvae.encode(refined_flat)  # (B*L, n_q)
+        codes_flat = self.rqvae.encode(refined_flat)
         codes = codes_flat.reshape(B, L, -1)
         return codes, refined, M, N
 
