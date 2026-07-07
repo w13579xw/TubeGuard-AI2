@@ -1,1 +1,24 @@
-__pycache__/\n*.pyc\ncheckpoints/\nresults/\n*.egg-info/\n.env
+__pycache__/
+*.pyc
+checkpoints/
+results/
+*.egg-info/
+.env
+
+# 论文相关文件（禁止上传 GitHub）
+*.tex
+*.pdf
+*.aux
+*.log
+*.out
+*.bbl
+*.blg
+*.toc
+*.synctex.gz
+paper_draft*
+STAGE2_ABLATION_REPORT.md
+ARCHITECTURE_DIAGRAM_REVISION.md
+architecture_diagram_prompt.md
+
+# HTML 文件（禁止上传）
+*.html
