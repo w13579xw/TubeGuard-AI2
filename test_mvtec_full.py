@@ -386,6 +386,22 @@ def main():
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     os.makedirs(args.output_dir, exist_ok=True)
 
+    # Validate MVTec root up-front.
+    if not os.path.isdir(args.root):
+        raise SystemExit(
+            f"\n[ERROR] MVTec root does not exist: {args.root}\n"
+            f"        Pass --root <path_to_mvtec_ad> where the directory contains\n"
+            f"        subfolders like bottle/, cable/, capsule/, ...\n"
+        )
+    missing_cats = [c for c in ALL_CATEGORIES
+                    if not os.path.isdir(os.path.join(args.root, c))]
+    if len(missing_cats) == len(ALL_CATEGORIES):
+        raise SystemExit(
+            f"\n[ERROR] --root points to {os.path.abspath(args.root)}, but none of the\n"
+            f"        expected MVTec category subfolders were found.\n"
+            f"        Contents observed: {sorted(os.listdir(args.root))[:15]}\n"
+        )
+
     categories = ALL_CATEGORIES if args.category == 'all' else [args.category]
 
     all_results = {}

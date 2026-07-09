@@ -91,6 +91,24 @@ def build_loaders(root, category, image_size=256, batch_size=8, num_workers=4):
     test_dataset = MVTecDataset(root=root, category=category, split='test',
                                 image_size=image_size, transform=test_tf)
 
+    # Fail fast with an actionable message if the dataset root is wrong.
+    if len(train_dataset) == 0:
+        cat_dir = os.path.join(root, category)
+        train_good = os.path.join(cat_dir, 'train', 'good')
+        raise FileNotFoundError(
+            f"MVTec dataset is empty for category '{category}'.\n"
+            f"  Expected structure: {train_good}/*.png (or .jpg / .bmp)\n"
+            f"  Checked root: {os.path.abspath(root)}\n"
+            f"  Category dir exists: {os.path.isdir(cat_dir)}\n"
+            f"  train/good dir exists: {os.path.isdir(train_good)}\n"
+            f"Hint: --root must point to the MVTec AD root that contains {ALL_CATEGORIES[0]}/, {ALL_CATEGORIES[1]}/, ... subdirectories."
+        )
+    if len(test_dataset) == 0:
+        raise FileNotFoundError(
+            f"MVTec test set is empty for category '{category}'. "
+            f"Expected {os.path.join(root, category, 'test')}/<defect_type>/*.png"
+        )
+
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
                               num_workers=num_workers, pin_memory=True, drop_last=True)
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False,
@@ -619,6 +637,24 @@ def main():
     config = load_config(args.config)
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     os.makedirs(args.output_dir, exist_ok=True)
+
+    # Validate MVTec root up-front so we fail before spawning per-category jobs.
+    if not os.path.isdir(args.root):
+        raise SystemExit(
+            f"\n[ERROR] MVTec root does not exist: {args.root}\n"
+            f"        Pass --root <path_to_mvtec_ad> where the directory contains\n"
+            f"        subfolders like bottle/, cable/, capsule/, ...\n"
+        )
+    missing_cats = [c for c in ALL_CATEGORIES
+                    if not os.path.isdir(os.path.join(args.root, c))]
+    if len(missing_cats) == len(ALL_CATEGORIES):
+        raise SystemExit(
+            f"\n[ERROR] --root points to {os.path.abspath(args.root)}, but none of the\n"
+            f"        expected MVTec category subfolders were found.\n"
+            f"        Contents observed: {sorted(os.listdir(args.root))[:15]}\n"
+            f"        Hint: --root should be the folder that directly contains "
+            f"bottle/, cable/, capsule/, ...\n"
+        )
 
     categories = ALL_CATEGORIES if args.category == 'all' else [args.category]
 
