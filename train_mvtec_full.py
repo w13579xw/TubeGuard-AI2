@@ -10,10 +10,11 @@ Pipeline per category:
        - rqvae quantization distance (Stage 2 signal)
        - fused score (recon + rqvae, normalized)
 
-Output structure:
-  logs/mvtec_full/{category}/
+Output structure (logs and checkpoints are kept separate):
+  checkpoints/mvtec_full/{category}/
       stage1_best.pth
       stage2_best.pth
+  logs/mvtec_full/{category}/
       stage1_metrics.json
       stage2_metrics.json
       train.log
@@ -472,16 +473,23 @@ def train_stage2(model, train_loader, test_loader, device, logger, config,
 
 
 def train_one_category(category, root, config, device, output_dir,
+                       checkpoint_dir,
                        stage1_epochs=200, stage2_epochs=50,
                        patience=30, eval_every=5,
                        image_size=256, batch_size=8,
                        skip_stage2=False):
-    """Full pipeline: Stage 1 → Stage 2 → Evaluation."""
-    cat_dir = os.path.join(output_dir, category)
-    os.makedirs(cat_dir, exist_ok=True)
+    """Full pipeline: Stage 1 → Stage 2 → Evaluation.
+
+    output_dir     — directory for logs and metrics JSON (e.g. logs/mvtec_full/)
+    checkpoint_dir — directory for model weights (e.g. checkpoints/mvtec_full/)
+    """
+    cat_log_dir = os.path.join(output_dir, category)
+    cat_ckpt_dir = os.path.join(checkpoint_dir, category)
+    os.makedirs(cat_log_dir, exist_ok=True)
+    os.makedirs(cat_ckpt_dir, exist_ok=True)
 
     # Per-category logger
-    log_path = os.path.join(cat_dir, 'train.log')
+    log_path = os.path.join(cat_log_dir, 'train.log')
     logger = logging.getLogger(f'mvtec_full_{category}')
     logger.handlers.clear()
     logger.setLevel(logging.INFO)
@@ -493,6 +501,8 @@ def train_one_category(category, root, config, device, output_dir,
     logger.info(f"{'='*70}")
     logger.info(f"  MVTec Category: {category}")
     logger.info(f"{'='*70}")
+    logger.info(f"  Log dir:        {cat_log_dir}")
+    logger.info(f"  Checkpoint dir: {cat_ckpt_dir}")
 
     train_loader, test_loader = build_loaders(root, category, image_size, batch_size)
     logger.info(f"  Train (normal-only): {len(train_loader.dataset)}")
@@ -502,7 +512,7 @@ def train_one_category(category, root, config, device, output_dir,
     logger.info(f"  Total params: {sum(p.numel() for p in model.parameters()):,}")
 
     # ---- Stage 1 ----
-    stage1_ckpt = os.path.join(cat_dir, 'stage1_best.pth')
+    stage1_ckpt = os.path.join(cat_ckpt_dir, 'stage1_best.pth')
     train_cfg = config.get('train', {})
     logger.info(f"\n>>> Stage 1: Reconstruction Pre-training ({stage1_epochs} epochs)")
     s1_auroc, s1_epoch, s1_time = train_stage1(
@@ -519,14 +529,14 @@ def train_one_category(category, root, config, device, output_dir,
     metrics_s1 = evaluate_mvtec(model, test_loader, device, use_stage2=False)
     metrics_s1['recon']['best_epoch'] = s1_epoch
     metrics_s1['recon']['train_time_h'] = s1_time
-    with open(os.path.join(cat_dir, 'stage1_metrics.json'), 'w') as f:
+    with open(os.path.join(cat_log_dir, 'stage1_metrics.json'), 'w') as f:
         json.dump(metrics_s1, f, indent=2, default=float)
 
     if skip_stage2:
         return {'stage1': metrics_s1, 'stage2': None}
 
     # ---- Stage 2 ----
-    stage2_ckpt = os.path.join(cat_dir, 'stage2_best.pth')
+    stage2_ckpt = os.path.join(cat_ckpt_dir, 'stage2_best.pth')
     logger.info(f"\n>>> Stage 2: RQ-VAE + TAR Joint Training ({stage2_epochs} epochs)")
     s2_auroc, s2_epoch, s2_time = train_stage2(
         model, train_loader, test_loader, device, logger, config,
@@ -543,7 +553,7 @@ def train_one_category(category, root, config, device, output_dir,
     for name in metrics_s2:
         metrics_s2[name]['best_epoch'] = s2_epoch
         metrics_s2[name]['train_time_h'] = s2_time
-    with open(os.path.join(cat_dir, 'stage2_metrics.json'), 'w') as f:
+    with open(os.path.join(cat_log_dir, 'stage2_metrics.json'), 'w') as f:
         json.dump(metrics_s2, f, indent=2, default=float)
 
     # Log final summary
@@ -624,7 +634,10 @@ def main():
     parser.add_argument('--config', type=str, default='configs/default.yaml')
     parser.add_argument('--category', type=str, default='all')
     parser.add_argument('--device', type=str, default='cuda')
-    parser.add_argument('--output_dir', type=str, default='logs/mvtec_full')
+    parser.add_argument('--output_dir', type=str, default='logs/mvtec_full',
+                        help='Directory for logs and metrics JSON files')
+    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints/mvtec_full',
+                        help='Directory for saved model weights (.pth files)')
     parser.add_argument('--image_size', type=int, default=256)
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--stage1_epochs', type=int, default=200)
@@ -637,6 +650,7 @@ def main():
     config = load_config(args.config)
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
 
     # Validate MVTec root up-front so we fail before spawning per-category jobs.
     if not os.path.isdir(args.root):
@@ -663,6 +677,7 @@ def main():
         try:
             res = train_one_category(
                 cat, args.root, config, device, args.output_dir,
+                checkpoint_dir=args.checkpoint_dir,
                 stage1_epochs=args.stage1_epochs,
                 stage2_epochs=args.stage2_epochs,
                 patience=args.patience,

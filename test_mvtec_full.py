@@ -11,18 +11,22 @@ Output:
   logs/mvtec_eval/{category}_stage{1|2}_metrics.json
   logs/mvtec_eval/{category}_stage{1|2}_scores.csv
 
+Checkpoints are expected under:
+  checkpoints/mvtec_full/{category}/stage{1|2}_best.pth
+(set by train_mvtec_full.py --checkpoint_dir)
+
 Usage:
   # Single category, Stage 1 checkpoint
   python test_mvtec_full.py --root /path/to/mvtec --category bottle \
-      --checkpoint logs/mvtec_full/bottle/stage1_best.pth --stage 1
+      --checkpoint checkpoints/mvtec_full/bottle/stage1_best.pth --stage 1
 
   # Single category, Stage 2 checkpoint (full model with RQ-VAE + TAR)
   python test_mvtec_full.py --root /path/to/mvtec --category bottle \
-      --checkpoint logs/mvtec_full/bottle/stage2_best.pth --stage 2
+      --checkpoint checkpoints/mvtec_full/bottle/stage2_best.pth --stage 2
 
   # All categories, auto-locate checkpoints under a common root
   python test_mvtec_full.py --root /path/to/mvtec --category all \
-      --checkpoint_root logs/mvtec_full --stage 2
+      --checkpoint_root checkpoints/mvtec_full --stage 2
 """
 
 import argparse
@@ -371,7 +375,7 @@ def main():
                         help='Category name or "all"')
     parser.add_argument('--checkpoint', type=str, default=None,
                         help='Single-category checkpoint path')
-    parser.add_argument('--checkpoint_root', type=str, default='logs/mvtec_full',
+    parser.add_argument('--checkpoint_root', type=str, default='checkpoints/mvtec_full',
                         help='For --category all: root dir with '
                              '{category}/stage{1|2}_best.pth structure')
     parser.add_argument('--stage', type=int, default=1, choices=[1, 2],
